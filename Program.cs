@@ -35,7 +35,7 @@ namespace QScreen
     public static class UpdateChecker
     {
         public const string CurrentVersion = "9.3.0";
-        public static string Repo = "YOUR_GITHUB_USERNAME/QScreen";
+        public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
         {
