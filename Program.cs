@@ -1869,7 +1869,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 await dw.StoreAsync();
                 await outputStream.FlushAsync();
 
-                var decoder = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(randomAccessStatus: randomAccessStream); // fixed arg
+                var decoder = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(randomAccessStream);
                 var softwareBitmap = await decoder.GetSoftwareBitmapAsync();
 
                 var ocrEngine = Windows.Media.Ocr.OcrEngine.TryCreateFromUserProfileLanguages();
