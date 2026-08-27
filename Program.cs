@@ -31,10 +31,49 @@ using MessageBox = System.Windows.MessageBox;
 
 namespace QScreen
 {
-    // --- Модуль обновления через GitHub Releases ---
+    public static class AppIconProvider
+    {
+        private static Icon? _cachedIcon;
+
+        public static Icon GetAppIcon()
+        {
+            if (_cachedIcon != null) return _cachedIcon;
+
+            try
+            {
+                var exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+                if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
+                {
+                    _cachedIcon = Icon.ExtractAssociatedIcon(exePath);
+                }
+            }
+            catch { }
+
+            if (_cachedIcon == null && File.Exists("QScreen.ico"))
+            {
+                try { _cachedIcon = new Icon("QScreen.ico"); } catch { }
+            }
+
+            return _cachedIcon ?? SystemIcons.Application;
+        }
+
+        public static ImageSource? GetImageSource()
+        {
+            try
+            {
+                var icon = GetAppIcon();
+                return Imaging.CreateBitmapSourceFromHIcon(icon.Handle, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.3.0";
+        public const string CurrentVersion = "9.3.1";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -91,7 +130,6 @@ namespace QScreen
         }
     }
 
-    // --- Win32 P/Invoke & Тёмная тема окна DWM ---
     public static class Win32
     {
         [DllImport("user32.dll")]
@@ -378,7 +416,6 @@ namespace QScreen
         }
     }
 
-    // --- Главный контроллер трея ---
     public class AppController
     {
         private Forms.NotifyIcon _notifyIcon;
@@ -395,15 +432,7 @@ namespace QScreen
         public AppController()
         {
             _notifyIcon = new Forms.NotifyIcon();
-            if (File.Exists("QScreen.ico"))
-            {
-                _notifyIcon.Icon = new Icon("QScreen.ico");
-            }
-            else
-            {
-                _notifyIcon.Icon = SystemIcons.Application;
-            }
-
+            _notifyIcon.Icon = AppIconProvider.GetAppIcon();
             _notifyIcon.Text = "QScreen Studio";
             _notifyIcon.Visible = true;
 
@@ -523,7 +552,6 @@ namespace QScreen
         }
     }
 
-    // --- Интерактивный рекордер горячих клавиш ---
     public class HotkeyRecorderControl : Button
     {
         private HotkeyBinding _binding;
@@ -625,7 +653,6 @@ namespace QScreen
         }
     }
 
-    // --- Окно настроек ---
     public class SettingsWindow : Window
     {
         private AppController _controller;
@@ -644,11 +671,7 @@ namespace QScreen
             ResizeMode = ResizeMode.NoResize;
 
             Win32.ApplyDarkMode(this);
-
-            if (File.Exists("QScreen.ico"))
-            {
-                Icon = BitmapFrame.Create(new Uri(System.IO.Path.GetFullPath("QScreen.ico")));
-            }
+            Icon = AppIconProvider.GetImageSource();
 
             BuildUI();
         }
@@ -822,7 +845,7 @@ namespace QScreen
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.0)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.1)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -857,7 +880,6 @@ namespace QScreen
         }
     }
 
-    // --- Оверлей захвата ---
     public class QScreenOverlayWindow : Window
     {
         private Bitmap _screenBitmap;
@@ -1017,7 +1039,6 @@ namespace QScreen
         }
     }
 
-    // --- Премиальный графический редактор QScreen Studio ---
     public class QScreenEditorWindow : Window
     {
         private Bitmap _baseBitmap;
@@ -1058,11 +1079,7 @@ namespace QScreen
             Height = Math.Max(bitmap.Height + 180, 560);
 
             Win32.ApplyDarkMode(this);
-
-            if (File.Exists("QScreen.ico"))
-            {
-                Icon = BitmapFrame.Create(new Uri(System.IO.Path.GetFullPath("QScreen.ico")));
-            }
+            Icon = AppIconProvider.GetImageSource();
 
             InjectStyles();
             BuildUI();
@@ -1081,7 +1098,6 @@ namespace QScreen
             _rootGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
             _rootGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(60) });
 
-            // 1. Верхняя панель инструментов
             var topCard = new Border
             {
                 Background = new SolidColorBrush(Color.FromRgb(32, 34, 42)),
@@ -1128,7 +1144,6 @@ namespace QScreen
             Grid.SetRow(topCard, 0);
             _rootGrid.Children.Add(topCard);
 
-            // 2. Холст на серой подложке
             var scroll = new ScrollViewer
             {
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
@@ -1153,7 +1168,6 @@ namespace QScreen
             Grid.SetRow(scroll, 1);
             _rootGrid.Children.Add(scroll);
 
-            // 3. Нижняя карточка действий
             var bottomCard = new Border
             {
                 Background = new SolidColorBrush(Color.FromRgb(32, 34, 42)),
