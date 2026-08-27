@@ -43,14 +43,14 @@ namespace QScreen
             try
             {
                 var exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
-                if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
+                if (!string.IsNullOrEmpty(exePath) && System.IO.File.Exists(exePath))
                 {
                     _cachedIcon = Icon.ExtractAssociatedIcon(exePath);
                 }
             }
             catch { }
 
-            if (_cachedIcon == null && File.Exists("QScreen.ico"))
+            if (_cachedIcon == null && System.IO.File.Exists("QScreen.ico"))
             {
                 try { _cachedIcon = new Icon("QScreen.ico"); } catch { }
             }
@@ -72,7 +72,6 @@ namespace QScreen
         }
     }
 
-    // --- Нативная система тихой автозагрузки и замены файлов (OTA Auto-Updater) ---
     public static class UpdateChecker
     {
         public const string CurrentVersion = "9.3.2";
@@ -98,7 +97,6 @@ namespace QScreen
 
                 if (latestVer > currentVer)
                 {
-                    // Находим прямую ссылку на zip в assets
                     string downloadUrl = "";
                     if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
                     {
@@ -181,35 +179,32 @@ namespace QScreen
 
             try
             {
-                var tempDir = Path.Combine(Path.GetTempPath(), "QScreen_Update_" + Guid.NewGuid().ToString("N"));
-                Directory.CreateDirectory(tempDir);
-                var zipFile = Path.Combine(tempDir, "update.zip");
+                var tempDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "QScreen_Update_" + Guid.NewGuid().ToString("N"));
+                System.IO.Directory.CreateDirectory(tempDir);
+                var zipFile = System.IO.Path.Combine(tempDir, "update.zip");
 
                 using (var client = new HttpClient())
                 {
                     client.DefaultRequestHeaders.Add("User-Agent", "QScreen-App");
                     var data = await client.GetByteArrayAsync(zipUrl);
-                    await File.WriteAllBytesAsync(zipFile, data);
+                    await System.IO.File.WriteAllBytesAsync(zipFile, data);
                 }
 
-                var extractDir = Path.Combine(tempDir, "extracted");
+                var extractDir = System.IO.Path.Combine(tempDir, "extracted");
                 ZipFile.ExtractToDirectory(zipFile, extractDir);
 
-                // Текущая папка установки приложения
                 var currentExe = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule!.FileName;
-                var installDir = Path.GetDirectoryName(currentExe)!;
+                var installDir = System.IO.Path.GetDirectoryName(currentExe)!;
 
-                // Создаем скрипт-апдейтер на PowerShell, который подождет закрытия и перенесет файлы
-                var updaterScript = Path.Combine(tempDir, "apply_update.ps1");
+                var updaterScript = System.IO.Path.Combine(tempDir, "apply_update.ps1");
                 var psContent = $@"
 Start-Sleep -Milliseconds 800
 Copy-Item -Path '{extractDir}\*' -Destination '{installDir}' -Recurse -Force
 Start-Process '{currentExe}'
 Remove-Item -Path '{tempDir}' -Recurse -Force
 ";
-                File.WriteAllText(updaterScript, psContent, Encoding.UTF8);
+                System.IO.File.WriteAllText(updaterScript, psContent, Encoding.UTF8);
 
-                // Запуск апдейтера и завершение текущего приложения
                 var psi = new ProcessStartInfo
                 {
                     FileName = "powershell.exe",
@@ -421,9 +416,9 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             try
             {
-                if (File.Exists(ConfigPath))
+                if (System.IO.File.Exists(ConfigPath))
                 {
-                    foreach (var line in File.ReadAllLines(ConfigPath))
+                    foreach (var line in System.IO.File.ReadAllLines(ConfigPath))
                     {
                         var parts = line.Split('=', 2);
                         if (parts.Length != 2) continue;
@@ -438,7 +433,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                         else if (k == "JpegQuality" && double.TryParse(v, out var jq)) JpegQuality = jq;
                         else if (k == "FilenamePrefix") FilenamePrefix = v;
                         else if (k == "DateFormat") DateFormat = v;
-                        else if (k == "SaveFolder" && Directory.Exists(v)) SaveFolder = v;
+                        else if (k == "SaveFolder" && System.IO.Directory.Exists(v)) SaveFolder = v;
                         else if (k == "DirectSave" && bool.TryParse(v, out var ds)) DirectSave = ds;
                         else if (k == "ShowThumbnail" && bool.TryParse(v, out var st)) ShowThumbnail = st;
                     }
@@ -452,7 +447,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             try
             {
                 var dir = System.IO.Path.GetDirectoryName(ConfigPath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir)) System.IO.Directory.CreateDirectory(dir);
                 var lines = new[]
                 {
                     $"HK_Area={HK_Area.DisplayText}",
@@ -468,7 +463,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     $"DirectSave={DirectSave}",
                     $"ShowThumbnail={ShowThumbnail}"
                 };
-                File.WriteAllLines(ConfigPath, lines);
+                System.IO.File.WriteAllLines(ConfigPath, lines);
             }
             catch { }
         }
@@ -1874,7 +1869,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 await dw.StoreAsync();
                 await outputStream.FlushAsync();
 
-                var decoder = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(randomAccessStream);
+                var decoder = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(randomAccessStatus: randomAccessStream); // fixed arg
                 var softwareBitmap = await decoder.GetSoftwareBitmapAsync();
 
                 var ocrEngine = Windows.Media.Ocr.OcrEngine.TryCreateFromUserProfileLanguages();
