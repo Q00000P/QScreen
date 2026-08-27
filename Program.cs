@@ -74,7 +74,7 @@ namespace QScreen
 
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.3.2";
+        public const string CurrentVersion = "9.3.3";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -238,14 +238,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-        [DllImport("user32.dll")]
-        public static extern bool SetForegroundWindow(IntPtr hWnd);
-        [DllImport("user32.dll")]
-        public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-        [DllImport("user32.dll")]
-        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-        [DllImport("user32.dll")]
-        public static extern bool IsIconic(IntPtr hWnd);
 
         [DllImport("dwmapi.dll")]
         public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
@@ -308,7 +300,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
                     int w = r.Right - r.Left;
                     int h = r.Bottom - r.Top;
-                    if (w > 60 && h > 60 && r.Left >= -500 && r.Top >= -500)
+                    if (w > 80 && h > 80 && r.Left >= -1000 && r.Top >= -1000)
                     {
                         var sb = new StringBuilder(256);
                         Win32.GetWindowText(hwnd, sb, 256);
@@ -330,26 +322,18 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             return list;
         }
 
-        public static Bitmap CaptureWindowReliable(IntPtr hwnd, Rect fallbackBounds)
+        // Безопасный и быстрый захват окна без зависаний через вычисление DWM-границ
+        public static Bitmap CaptureWindowFast(Rect bounds)
         {
-            if (Win32.IsIconic(hwnd)) Win32.ShowWindow(hwnd, Win32.SW_RESTORE);
-            Win32.SetForegroundWindow(hwnd);
-            Win32.SetWindowPos(hwnd, Win32.HWND_TOP, 0, 0, 0, 0, Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_SHOWWINDOW);
-            Thread.Sleep(70);
-
-            Win32.RECT r;
-            if (Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_EXTENDED_FRAME_BOUNDS, out r, Marshal.SizeOf(typeof(Win32.RECT))) != 0)
-            {
-                Win32.GetWindowRect(hwnd, out r);
-            }
-
-            int width = Math.Max(1, r.Right - r.Left);
-            int height = Math.Max(1, r.Bottom - r.Top);
+            int x = (int)Math.Max(0, bounds.X);
+            int y = (int)Math.Max(0, bounds.Y);
+            int width = (int)Math.Max(10, bounds.Width);
+            int height = (int)Math.Max(10, bounds.Height);
 
             var bmp = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
             {
-                g.CopyFromScreen(r.Left, r.Top, 0, 0, new System.Drawing.Size(width, height), CopyPixelOperation.SourceCopy);
+                g.CopyFromScreen(x, y, 0, 0, new System.Drawing.Size(width, height), CopyPixelOperation.SourceCopy);
             }
             return bmp;
         }
@@ -796,7 +780,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             var fmtPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
             fmtPanel.Children.Add(new TextBlock { Text = "Формат по умолчанию:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
             var cbFormat = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
-            cbFormat.Items.Add("PNG (Без потерь, Retina)");
+            cbFormat.Items.Add("PNG (Без потерь)");
             cbFormat.Items.Add("JPG (Компактный размер)");
             cbFormat.Items.Add("PDF (Документ)");
             cbFormat.SelectedIndex = AppSettings.DefaultFormat switch { "jpg" => 1, "pdf" => 2, _ => 0 };
@@ -939,7 +923,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.2)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.3)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -1047,7 +1031,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 {
                     Close();
                     var targetWin = _hoveredWindow.Value;
-                    var isolatedBmp = WindowDetector.CaptureWindowReliable(targetWin.Hwnd, targetWin.Bounds);
+                    var isolatedBmp = WindowDetector.CaptureWindowFast(targetWin.Bounds);
                     new QScreenEditorWindow(isolatedBmp).Show();
                 }
                 else if (rect.Width > 5 && rect.Height > 5)
