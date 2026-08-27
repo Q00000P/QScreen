@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.IO.Compression;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -71,9 +72,10 @@ namespace QScreen
         }
     }
 
+    // --- Нативная система тихой автозагрузки и замены файлов (OTA Auto-Updater) ---
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.3.1";
+        public const string CurrentVersion = "9.3.2";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -90,16 +92,34 @@ namespace QScreen
                 var root = doc.RootElement;
 
                 var tagName = root.GetProperty("tag_name").GetString() ?? "";
-                var htmlUrl = root.GetProperty("html_url").GetString() ?? "";
-
                 var remoteVer = tagName.TrimStart('v', 'V');
                 var currentVer = new Version(CurrentVersion);
                 var latestVer = new Version(remoteVer);
 
                 if (latestVer > currentVer)
                 {
+                    // Находим прямую ссылку на zip в assets
+                    string downloadUrl = "";
+                    if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var asset in assets.EnumerateArray())
+                        {
+                            var name = asset.GetProperty("name").GetString() ?? "";
+                            if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                            {
+                                downloadUrl = asset.GetProperty("browser_download_url").GetString() ?? "";
+                                break;
+                            }
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(downloadUrl))
+                    {
+                        downloadUrl = root.GetProperty("html_url").GetString() ?? "";
+                    }
+
                     var result = MessageBox.Show(
-                        $"Доступна новая версия QScreen v{remoteVer}!\n\nТекущая версия: v{CurrentVersion}\n\nОткрыть страницу скачивания?",
+                        $"Доступна новая версия QScreen v{remoteVer}!\n\nТекущая версия: v{CurrentVersion}\n\nСкачать и установить обновление автоматически?",
                         "Обновление QScreen",
                         MessageBoxButton.YesNo,
                         MessageBoxImage.Information
@@ -107,7 +127,14 @@ namespace QScreen
 
                     if (result == MessageBoxResult.Yes)
                     {
-                        Process.Start(new ProcessStartInfo(htmlUrl) { UseShellExecute = true });
+                        if (downloadUrl.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                        {
+                            await PerformSilentUpdate(downloadUrl, remoteVer);
+                        }
+                        else
+                        {
+                            Process.Start(new ProcessStartInfo(downloadUrl) { UseShellExecute = true });
+                        }
                     }
                 }
                 else if (isUserInitiated)
@@ -126,6 +153,78 @@ namespace QScreen
                 {
                     MessageBox.Show($"Не удалось проверить обновления: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Warning);
                 }
+            }
+        }
+
+        private static async Task PerformSilentUpdate(string zipUrl, string newVer)
+        {
+            var progressWin = new Window
+            {
+                Title = "Обновление QScreen",
+                Width = 360,
+                Height = 120,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                Background = new SolidColorBrush(Color.FromRgb(28, 30, 36)),
+                ResizeMode = ResizeMode.NoResize,
+                Topmost = true
+            };
+            Win32.ApplyDarkMode(progressWin);
+            progressWin.Icon = AppIconProvider.GetImageSource();
+
+            var panel = new StackPanel { Margin = new Thickness(16) };
+            var lbl = new TextBlock { Text = $"Загрузка QScreen v{newVer}...", Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 10), FontWeight = FontWeights.SemiBold };
+            var pb = new ProgressBar { Height = 14, IsIndeterminate = true, Background = new SolidColorBrush(Color.FromRgb(40, 44, 52)), Foreground = new SolidColorBrush(Color.FromRgb(50, 180, 255)) };
+            panel.Children.Add(lbl);
+            panel.Children.Add(pb);
+            progressWin.Content = panel;
+            progressWin.Show();
+
+            try
+            {
+                var tempDir = Path.Combine(Path.GetTempPath(), "QScreen_Update_" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(tempDir);
+                var zipFile = Path.Combine(tempDir, "update.zip");
+
+                using (var client = new HttpClient())
+                {
+                    client.DefaultRequestHeaders.Add("User-Agent", "QScreen-App");
+                    var data = await client.GetByteArrayAsync(zipUrl);
+                    await File.WriteAllBytesAsync(zipFile, data);
+                }
+
+                var extractDir = Path.Combine(tempDir, "extracted");
+                ZipFile.ExtractToDirectory(zipFile, extractDir);
+
+                // Текущая папка установки приложения
+                var currentExe = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule!.FileName;
+                var installDir = Path.GetDirectoryName(currentExe)!;
+
+                // Создаем скрипт-апдейтер на PowerShell, который подождет закрытия и перенесет файлы
+                var updaterScript = Path.Combine(tempDir, "apply_update.ps1");
+                var psContent = $@"
+Start-Sleep -Milliseconds 800
+Copy-Item -Path '{extractDir}\*' -Destination '{installDir}' -Recurse -Force
+Start-Process '{currentExe}'
+Remove-Item -Path '{tempDir}' -Recurse -Force
+";
+                File.WriteAllText(updaterScript, psContent, Encoding.UTF8);
+
+                // Запуск апдейтера и завершение текущего приложения
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = $"-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File \"{updaterScript}\"",
+                    UseShellExecute = true,
+                    CreateNoWindow = true
+                };
+
+                Process.Start(psi);
+                Application.Current.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                progressWin.Close();
+                MessageBox.Show($"Ошибка при установке обновления: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
     }
@@ -845,7 +944,7 @@ namespace QScreen
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.1)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.2)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -1790,15 +1889,6 @@ namespace QScreen
             {
                 MessageBox.Show($"Ошибка OCR: {ex.Message}");
             }
-        }
-
-        private Bitmap SourceToBitmap(BitmapSource bitmapsource)
-        {
-            using var outStream = new MemoryStream();
-            BitmapEncoder enc = new BmpBitmapEncoder();
-            enc.Frames.Add(BitmapFrame.Create(bitmapsource));
-            enc.Save(outStream);
-            return new Bitmap(outStream);
         }
 
         private BitmapSource BitmapToImageSource(Bitmap bmp)
