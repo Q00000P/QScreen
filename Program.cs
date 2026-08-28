@@ -74,7 +74,7 @@ namespace QScreen
 
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.3.3";
+        public const string CurrentVersion = "9.3.4";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -235,9 +235,13 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         [DllImport("user32.dll")]
         public static extern bool IsWindowVisible(IntPtr hWnd);
         [DllImport("user32.dll")]
+        public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+        [DllImport("user32.dll")]
         public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+        [DllImport("user32.dll")]
+        public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
         [DllImport("dwmapi.dll")]
         public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
@@ -264,6 +268,13 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
         public const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
 
+        public const uint GW_OWNER = 4;
+        public const int GWL_STYLE = -16;
+        public const int GWL_EXSTYLE = -20;
+        public const int WS_VISIBLE = 0x10000000;
+        public const int WS_EX_TOOLWINDOW = 0x00000080;
+        public const int WS_EX_APPWINDOW = 0x00040000;
+
         public static void ApplyDarkMode(Window window)
         {
             window.SourceInitialized += (s, e) =>
@@ -285,36 +296,46 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
     public static class WindowDetector
     {
+        // Надежный алгоритм фильтрации и детекции окон как в ShareX
         public static List<WindowTarget> GetVisibleWindows()
         {
             var list = new List<WindowTarget>();
             Win32.EnumWindows((hwnd, lParam) =>
             {
-                if (Win32.IsWindowVisible(hwnd))
-                {
-                    Win32.RECT r;
-                    if (Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_EXTENDED_FRAME_BOUNDS, out r, Marshal.SizeOf(typeof(Win32.RECT))) != 0)
-                    {
-                        Win32.GetWindowRect(hwnd, out r);
-                    }
+                if (!Win32.IsWindowVisible(hwnd)) return true;
 
-                    int w = r.Right - r.Left;
-                    int h = r.Bottom - r.Top;
-                    if (w > 80 && h > 80 && r.Left >= -1000 && r.Top >= -1000)
+                // Отсеиваем дочерние и вспомогательные окна (как ShareX)
+                IntPtr owner = Win32.GetWindow(hwnd, Win32.GW_OWNER);
+                int exStyle = Win32.GetWindowLong(hwnd, Win32.GWL_EXSTYLE);
+                int style = Win32.GetWindowLong(hwnd, Win32.GWL_STYLE);
+
+                if ((exStyle & Win32.WS_EX_TOOLWINDOW) != 0 && owner != IntPtr.Zero) return true;
+                if ((exStyle & Win32.WS_EX_APPWINDOW) == 0 && owner != IntPtr.Zero) return true;
+
+                Win32.RECT r;
+                // Получаем точные DWM границы окна (без теней)
+                if (Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_EXTENDED_FRAME_BOUNDS, out r, Marshal.SizeOf(typeof(Win32.RECT))) != 0)
+                {
+                    Win32.GetWindowRect(hwnd, out r);
+                }
+
+                int w = r.Right - r.Left;
+                int h = r.Bottom - r.Top;
+
+                if (w > 80 && h > 80 && r.Left >= -3000 && r.Top >= -3000)
+                {
+                    var sb = new StringBuilder(256);
+                    Win32.GetWindowText(hwnd, sb, 256);
+                    var title = sb.ToString().Trim();
+
+                    if (!string.IsNullOrEmpty(title) && !title.Contains("QScreen") && !title.Contains("Overlay") && title != "Program Manager")
                     {
-                        var sb = new StringBuilder(256);
-                        Win32.GetWindowText(hwnd, sb, 256);
-                        var title = sb.ToString().Trim();
-                        if (string.IsNullOrEmpty(title)) title = "Window";
-                        if (!title.Contains("QScreen") && !title.Contains("Overlay"))
+                        list.Add(new WindowTarget
                         {
-                            list.Add(new WindowTarget
-                            {
-                                Hwnd = hwnd,
-                                Bounds = new Rect(r.Left, r.Top, w, h),
-                                Title = title
-                            });
-                        }
+                            Hwnd = hwnd,
+                            Bounds = new Rect(r.Left, r.Top, w, h),
+                            Title = title
+                        });
                     }
                 }
                 return true;
@@ -322,7 +343,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             return list;
         }
 
-        // Безопасный и быстрый захват окна без зависаний через вычисление DWM-границ
         public static Bitmap CaptureWindowFast(Rect bounds)
         {
             int x = (int)Math.Max(0, bounds.X);
@@ -923,7 +943,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.3)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.4)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = HorizontalAlignment.Center,
