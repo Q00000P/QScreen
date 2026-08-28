@@ -75,7 +75,7 @@ namespace QScreen
 
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.3.8";
+        public const string CurrentVersion = "9.3.9";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -238,6 +238,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         [DllImport("user32.dll")]
         public static extern bool IsIconic(IntPtr hWnd);
         [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+        [DllImport("user32.dll")]
         public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
         [DllImport("user32.dll")]
         public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
@@ -259,6 +265,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+        public static readonly IntPtr HWND_TOP = IntPtr.Zero;
+        public const uint SWP_NOMOVE = 0x0002;
+        public const uint SWP_NOSIZE = 0x0001;
+        public const uint SWP_SHOWWINDOW = 0x0040;
+        public const int SW_RESTORE = 9;
 
         public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
         public const int DWMWA_CLOAKED = 14;
@@ -307,11 +319,9 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             {
                 if (!Win32.IsWindowVisible(hwnd) || Win32.IsIconic(hwnd)) return true;
 
-                // Отсекаем только окна самого процесса QScreen по PID
                 Win32.GetWindowThreadProcessId(hwnd, out uint winPid);
                 if (winPid == currentPid) return true;
 
-                // Отсекаем невидимые фантомные UWP-слои Windows 10/11
                 if (Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0 && cloaked != 0)
                     return true;
 
@@ -356,6 +366,48 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             }, IntPtr.Zero);
 
             return list;
+        }
+
+        // Изолированный захват окна: выводим окно на передний план и снимаем его чистый кадр без наложения других окон
+        public static Bitmap CaptureWindowIsolated(IntPtr hwnd, System.Drawing.Rectangle fallbackBounds, Bitmap fallbackBmp)
+        {
+            try
+            {
+                if (Win32.IsIconic(hwnd)) Win32.ShowWindow(hwnd, Win32.SW_RESTORE);
+                Win32.SetForegroundWindow(hwnd);
+                Win32.SetWindowPos(hwnd, Win32.HWND_TOP, 0, 0, 0, 0, Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_SHOWWINDOW);
+                Thread.Sleep(75);
+
+                Win32.RECT r;
+                if (Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_EXTENDED_FRAME_BOUNDS, out r, Marshal.SizeOf(typeof(Win32.RECT))) != 0 || (r.Right - r.Left <= 10))
+                {
+                    Win32.GetWindowRect(hwnd, out r);
+                }
+
+                int w = Math.Max(10, r.Right - r.Left);
+                int h = Math.Max(10, r.Bottom - r.Top);
+
+                var bmp = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.CopyFromScreen(r.Left, r.Top, 0, 0, new System.Drawing.Size(w, h), CopyPixelOperation.SourceCopy);
+                }
+                return bmp;
+            }
+            catch
+            {
+                int rx = Math.Max(0, Math.Min(fallbackBounds.X, fallbackBmp.Width - 1));
+                int ry = Math.Max(0, Math.Min(fallbackBounds.Y, fallbackBmp.Height - 1));
+                int rw = Math.Max(1, Math.Min(fallbackBounds.Width, fallbackBmp.Width - rx));
+                int rh = Math.Max(1, Math.Min(fallbackBounds.Height, fallbackBmp.Height - ry));
+
+                var target = new Bitmap(rw, rh, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(target))
+                {
+                    g.DrawImage(fallbackBmp, new System.Drawing.Rectangle(0, 0, rw, rh), rx, ry, rw, rh, GraphicsUnit.Pixel);
+                }
+                return target;
+            }
         }
     }
 
@@ -939,7 +991,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.8)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.9)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -1006,7 +1058,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             WindowStyle = WindowStyle.None;
             Topmost = true;
             AllowsTransparency = true;
-            // Полупрозрачный фон с Alpha=1 для гарантированного перехвата кликов Windows
             Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
             Cursor = Cursors.None;
             Focusable = true;
@@ -1030,7 +1081,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 }
             };
 
-            // Гарантированная отмена по Escape
             PreviewKeyDown += (s, e) =>
             {
                 if (e.Key == Key.Escape)
@@ -1040,7 +1090,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 }
             };
 
-            // Правый клик = отмена режима захвата
             PreviewMouseRightButtonDown += (s, e) =>
             {
                 ReleaseMouseCapture();
@@ -1095,9 +1144,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 }
                 else if (_isSmartMode && _hoveredWindow != null)
                 {
+                    IntPtr targetHwnd = _hoveredWindow.Hwnd;
+                    var bounds = _hoveredWindow.PixelBounds;
                     Close();
-                    var cropped = CropBitmap(_screenBitmap, _hoveredWindow.PixelBounds);
-                    new QScreenEditorWindow(cropped).Show();
+                    var cleanBmp = WindowDetector.CaptureWindowIsolated(targetHwnd, bounds, _screenBitmap);
+                    new QScreenEditorWindow(cleanBmp).Show();
                 }
                 else if (rect.Width > 5 && rect.Height > 5)
                 {
@@ -1711,10 +1762,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             }
             else if (_selectedTool == "bubble")
             {
-                var border = new Border { Width = Math.Max(w, 80), Height = Math.Max(h, 40), CornerRadius = new CornerRadius(10), Background = new SolidColorBrush(Color.FromArgb(220, 20, 22, 28)), BorderBrush = new SolidColorBrush(_selectedColor), BorderThickness = new Thickness(2), Padding = new Thickness(8) };
+                var border = new Border { Width = Math.Max(w, 100), Height = Math.Max(h, 45), CornerRadius = new CornerRadius(10), Background = new SolidColorBrush(Color.FromArgb(220, 20, 22, 28)), BorderBrush = new SolidColorBrush(_selectedColor), BorderThickness = new Thickness(2), Padding = new Thickness(6) };
+                var tb = new TextBox { Background = Brushes.Transparent, Foreground = Brushes.White, BorderThickness = new Thickness(0), FontSize = 14, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap, Text = "Текст..." };
+                border.Child = tb;
                 Canvas.SetLeft(border, x); Canvas.SetTop(border, y);
-                _canvas.Children.Add(border);
-                _previewElement = border;
+                AddElement(border);
+                tb.Focus();
             }
         }
 
