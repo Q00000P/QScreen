@@ -74,7 +74,7 @@ namespace QScreen
 
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.3.4";
+        public const string CurrentVersion = "9.3.5";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -271,7 +271,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public const uint GW_OWNER = 4;
         public const int GWL_STYLE = -16;
         public const int GWL_EXSTYLE = -20;
-        public const int WS_VISIBLE = 0x10000000;
         public const int WS_EX_TOOLWINDOW = 0x00000080;
         public const int WS_EX_APPWINDOW = 0x00040000;
 
@@ -296,7 +295,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
     public static class WindowDetector
     {
-        // Надежный алгоритм фильтрации и детекции окон как в ShareX
         public static List<WindowTarget> GetVisibleWindows()
         {
             var list = new List<WindowTarget>();
@@ -304,17 +302,15 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             {
                 if (!Win32.IsWindowVisible(hwnd)) return true;
 
-                // Отсеиваем дочерние и вспомогательные окна (как ShareX)
                 IntPtr owner = Win32.GetWindow(hwnd, Win32.GW_OWNER);
                 int exStyle = Win32.GetWindowLong(hwnd, Win32.GWL_EXSTYLE);
-                int style = Win32.GetWindowLong(hwnd, Win32.GWL_STYLE);
 
                 if ((exStyle & Win32.WS_EX_TOOLWINDOW) != 0 && owner != IntPtr.Zero) return true;
                 if ((exStyle & Win32.WS_EX_APPWINDOW) == 0 && owner != IntPtr.Zero) return true;
 
                 Win32.RECT r;
-                // Получаем точные DWM границы окна (без теней)
-                if (Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_EXTENDED_FRAME_BOUNDS, out r, Marshal.SizeOf(typeof(Win32.RECT))) != 0)
+                // Сначала пробуем DWM границы, если пусто — берем классический GetWindowRect
+                if (Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_EXTENDED_FRAME_BOUNDS, out r, Marshal.SizeOf(typeof(Win32.RECT))) != 0 || (r.Right - r.Left <= 10))
                 {
                     Win32.GetWindowRect(hwnd, out r);
                 }
@@ -322,7 +318,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 int w = r.Right - r.Left;
                 int h = r.Bottom - r.Top;
 
-                if (w > 80 && h > 80 && r.Left >= -3000 && r.Top >= -3000)
+                if (w > 60 && h > 60 && r.Left >= -3000 && r.Top >= -3000)
                 {
                     var sb = new StringBuilder(256);
                     Win32.GetWindowText(hwnd, sb, 256);
@@ -943,7 +939,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.4)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.5)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -1173,8 +1169,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Title = "QScreen Studio";
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = new SolidColorBrush(Color.FromRgb(24, 26, 32));
-            Width = Math.Max(bitmap.Width + 120, 920);
-            Height = Math.Max(bitmap.Height + 180, 560);
+
+            // Ограничиваем размер окна редактора рабочей областью экрана, чтобы шапка не улетала за границы
+            var workArea = SystemParameters.WorkArea;
+            Width = Math.Min(Math.Max(bitmap.Width + 120, 920), workArea.Width - 80);
+            Height = Math.Min(Math.Max(bitmap.Height + 180, 560), workArea.Height - 80);
 
             Win32.ApplyDarkMode(this);
             Icon = AppIconProvider.GetImageSource();
