@@ -74,7 +74,7 @@ namespace QScreen
 
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.3.5";
+        public const string CurrentVersion = "9.3.6";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -231,48 +231,39 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         [DllImport("user32.dll")]
         public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
         [DllImport("user32.dll")]
-        public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-        [DllImport("user32.dll")]
         public static extern bool IsWindowVisible(IntPtr hWnd);
         [DllImport("user32.dll")]
-        public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+        public static extern IntPtr WindowFromPoint(POINT Point);
+        [DllImport("user32.dll")]
+        public static extern bool GetCursorPos(out POINT lpPoint);
+        [DllImport("user32.dll", ExactSpelling = true)]
+        public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
         [DllImport("user32.dll")]
         public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-        [DllImport("user32.dll")]
-        public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
         [DllImport("dwmapi.dll")]
         public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
         [DllImport("dwmapi.dll")]
         public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
-        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT { public int X; public int Y; }
 
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 
-        public static readonly IntPtr HWND_TOP = IntPtr.Zero;
-        public const uint SWP_NOMOVE = 0x0002;
-        public const uint SWP_NOSIZE = 0x0001;
-        public const uint SWP_SHOWWINDOW = 0x0040;
-        public const int SW_RESTORE = 9;
+        public const uint GA_ROOT = 2;
+        public const uint GA_ROOTOWNER = 3;
+        public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+        public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        public const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
 
         public const uint MOD_ALT = 0x0001;
         public const uint MOD_CONTROL = 0x0002;
         public const uint MOD_SHIFT = 0x0004;
         public const uint MOD_WIN = 0x0008;
-
-        public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
-        public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
-        public const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
-
-        public const uint GW_OWNER = 4;
-        public const int GWL_STYLE = -16;
-        public const int GWL_EXSTYLE = -20;
-        public const int WS_EX_TOOLWINDOW = 0x00000080;
-        public const int WS_EX_APPWINDOW = 0x00040000;
 
         public static void ApplyDarkMode(Window window)
         {
@@ -283,75 +274,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref useDark, sizeof(int));
                 DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, ref useDark, sizeof(int));
             };
-        }
-    }
-
-    public struct WindowTarget
-    {
-        public IntPtr Hwnd;
-        public Rect Bounds;
-        public string Title;
-    }
-
-    public static class WindowDetector
-    {
-        public static List<WindowTarget> GetVisibleWindows()
-        {
-            var list = new List<WindowTarget>();
-            Win32.EnumWindows((hwnd, lParam) =>
-            {
-                if (!Win32.IsWindowVisible(hwnd)) return true;
-
-                IntPtr owner = Win32.GetWindow(hwnd, Win32.GW_OWNER);
-                int exStyle = Win32.GetWindowLong(hwnd, Win32.GWL_EXSTYLE);
-
-                if ((exStyle & Win32.WS_EX_TOOLWINDOW) != 0 && owner != IntPtr.Zero) return true;
-                if ((exStyle & Win32.WS_EX_APPWINDOW) == 0 && owner != IntPtr.Zero) return true;
-
-                Win32.RECT r;
-                // Сначала пробуем DWM границы, если пусто — берем классический GetWindowRect
-                if (Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_EXTENDED_FRAME_BOUNDS, out r, Marshal.SizeOf(typeof(Win32.RECT))) != 0 || (r.Right - r.Left <= 10))
-                {
-                    Win32.GetWindowRect(hwnd, out r);
-                }
-
-                int w = r.Right - r.Left;
-                int h = r.Bottom - r.Top;
-
-                if (w > 60 && h > 60 && r.Left >= -3000 && r.Top >= -3000)
-                {
-                    var sb = new StringBuilder(256);
-                    Win32.GetWindowText(hwnd, sb, 256);
-                    var title = sb.ToString().Trim();
-
-                    if (!string.IsNullOrEmpty(title) && !title.Contains("QScreen") && !title.Contains("Overlay") && title != "Program Manager")
-                    {
-                        list.Add(new WindowTarget
-                        {
-                            Hwnd = hwnd,
-                            Bounds = new Rect(r.Left, r.Top, w, h),
-                            Title = title
-                        });
-                    }
-                }
-                return true;
-            }, IntPtr.Zero);
-            return list;
-        }
-
-        public static Bitmap CaptureWindowFast(Rect bounds)
-        {
-            int x = (int)Math.Max(0, bounds.X);
-            int y = (int)Math.Max(0, bounds.Y);
-            int width = (int)Math.Max(10, bounds.Width);
-            int height = (int)Math.Max(10, bounds.Height);
-
-            var bmp = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-            using (var g = Graphics.FromImage(bmp))
-            {
-                g.CopyFromScreen(x, y, 0, 0, new System.Drawing.Size(width, height), CopyPixelOperation.SourceCopy);
-            }
-            return bmp;
         }
     }
 
@@ -591,15 +513,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         public static Bitmap CaptureEntireScreen()
         {
-            int w = (int)SystemParameters.VirtualScreenWidth;
-            int h = (int)SystemParameters.VirtualScreenHeight;
-            int x = (int)SystemParameters.VirtualScreenLeft;
-            int y = (int)SystemParameters.VirtualScreenTop;
-
-            var bmp = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            var bounds = Forms.SystemInformation.VirtualScreen;
+            var bmp = new Bitmap(bounds.Width, bounds.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
             {
-                g.CopyFromScreen(x, y, 0, 0, new System.Drawing.Size(w, h), CopyPixelOperation.SourceCopy);
+                g.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, new System.Drawing.Size(bounds.Width, bounds.Height), CopyPixelOperation.SourceCopy);
             }
             return bmp;
         }
@@ -757,12 +675,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             _controller = controller;
             Title = "Настройки";
-            Width = 510;
-            Height = 580;
+            Width = 530;
+            Height = 650;
+            MaxHeight = SystemParameters.WorkArea.Height - 40;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = new SolidColorBrush(Color.FromRgb(28, 30, 36));
             Foreground = Brushes.White;
-            ResizeMode = ResizeMode.NoResize;
 
             Win32.ApplyDarkMode(this);
             Icon = AppIconProvider.GetImageSource();
@@ -772,11 +690,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         private void BuildUI()
         {
-            var mainStack = new StackPanel { Margin = new Thickness(18) };
+            var mainStack = new StackPanel { Margin = new Thickness(18, 14, 18, 14) };
 
-            mainStack.Children.Add(new TextBlock { Text = "Горячие клавиши", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 8) });
+            mainStack.Children.Add(new TextBlock { Text = "Горячие клавиши", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 6) });
 
-            var gridHotkeys = new Grid { Margin = new Thickness(0, 0, 0, 10) };
+            var gridHotkeys = new Grid { Margin = new Thickness(0, 0, 0, 6) };
             gridHotkeys.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(200) });
             gridHotkeys.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
@@ -791,7 +709,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             mainStack.Children.Add(gridHotkeys);
             mainStack.Children.Add(CreateDivider());
 
-            mainStack.Children.Add(new TextBlock { Text = "Формат и имя сохраняемых файлов", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 8, 0, 8) });
+            mainStack.Children.Add(new TextBlock { Text = "Формат и имя сохраняемых файлов", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
 
             var fmtPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
             fmtPanel.Children.Add(new TextBlock { Text = "Формат по умолчанию:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
@@ -870,7 +788,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             datePanel.Children.Add(cbDate);
             mainStack.Children.Add(datePanel);
 
-            var prevPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 8) };
+            var prevPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 6) };
             prevPanel.Children.Add(new TextBlock { Text = "Пример имени: ", FontSize = 11, Foreground = Brushes.Gray });
             _previewText.FontSize = 11;
             _previewText.FontWeight = FontWeights.SemiBold;
@@ -881,7 +799,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(CreateDivider());
 
-            mainStack.Children.Add(new TextBlock { Text = "Папка для сохранения", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 8, 0, 6) });
+            mainStack.Children.Add(new TextBlock { Text = "Папка для сохранения", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
 
             var fldPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
             fldPanel.Children.Add(new TextBlock { Text = "Папка:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
@@ -902,21 +820,21 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             fldPanel.Children.Add(btnBrowse);
             mainStack.Children.Add(fldPanel);
 
-            var chkDirect = new CheckBox { Content = "Сохранять сразу в папку (без диалогового окна)", IsChecked = AppSettings.DirectSave, Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 8) };
+            var chkDirect = new CheckBox { Content = "Сохранять сразу в папку (без диалогового окна)", IsChecked = AppSettings.DirectSave, Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 6) };
             chkDirect.Checked += (s, e) => { AppSettings.DirectSave = true; AppSettings.Save(); };
             chkDirect.Unchecked += (s, e) => { AppSettings.DirectSave = false; AppSettings.Save(); };
             mainStack.Children.Add(chkDirect);
 
             mainStack.Children.Add(CreateDivider());
 
-            mainStack.Children.Add(new TextBlock { Text = "Действия и система", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 8, 0, 6) });
+            mainStack.Children.Add(new TextBlock { Text = "Действия и система", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
 
             var chkThumb = new CheckBox { Content = "Показывать миниатюру в углу экрана", IsChecked = AppSettings.ShowThumbnail, Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 6) };
             chkThumb.Checked += (s, e) => { AppSettings.ShowThumbnail = true; AppSettings.Save(); };
             chkThumb.Unchecked += (s, e) => { AppSettings.ShowThumbnail = false; AppSettings.Save(); };
             mainStack.Children.Add(chkThumb);
 
-            var chkStartup = new CheckBox { Content = "Запуск при входе в Windows", IsChecked = AppSettings.IsStartupEnabled(), Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 10) };
+            var chkStartup = new CheckBox { Content = "Запуск при входе в Windows", IsChecked = AppSettings.IsStartupEnabled(), Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 8) };
             chkStartup.Checked += (s, e) => AppSettings.SetStartup(true);
             chkStartup.Unchecked += (s, e) => AppSettings.SetStartup(false);
             mainStack.Children.Add(chkStartup);
@@ -927,7 +845,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 Background = new SolidColorBrush(Color.FromRgb(44, 48, 58)),
                 Foreground = Brushes.White,
                 BorderThickness = new Thickness(0),
-                Padding = new Thickness(8, 4, 8, 4),
+                Padding = new Thickness(10, 6, 10, 6),
                 HorizontalAlignment = HorizontalAlignment.Left,
                 Cursor = Cursors.Hand,
                 Margin = new Thickness(0, 0, 0, 8)
@@ -939,14 +857,21 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.5)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.6)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 6, 0, 0)
+                Margin = new Thickness(0, 6, 0, 4)
             });
 
-            Content = mainStack;
+            var scroll = new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = mainStack
+            };
+
+            Content = scroll;
         }
 
         private void AddHotkeyRow(Grid grid, int row, string label, HotkeyBinding binding)
@@ -970,7 +895,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         private Separator CreateDivider()
         {
-            return new Separator { Background = new SolidColorBrush(Color.FromArgb(30, 255, 255, 255)), Margin = new Thickness(0, 4, 0, 4) };
+            return new Separator { Background = new SolidColorBrush(Color.FromArgb(30, 255, 255, 255)), Margin = new Thickness(0, 3, 0, 3) };
         }
     }
 
@@ -978,8 +903,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
     {
         private Bitmap _screenBitmap;
         private bool _isSmartMode;
-        private List<WindowTarget> _windows = new();
-        private WindowTarget? _hoveredWindow;
+        private System.Drawing.Rectangle? _hoveredWindowPixelRect;
+        private Rect? _hoveredWindowDpiRect;
 
         private Point _startPoint;
         private Point _currentPoint;
@@ -1000,11 +925,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Background = Brushes.Transparent;
             Cursor = Cursors.None;
 
-            if (_isSmartMode)
-            {
-                _windows = WindowDetector.GetVisibleWindows();
-            }
-
             MouseDown += (s, e) =>
             {
                 if (e.LeftButton == MouseButtonState.Pressed)
@@ -1024,12 +944,13 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     if (Math.Abs(_currentPoint.X - _startPoint.X) > 5 || Math.Abs(_currentPoint.Y - _startPoint.Y) > 5)
                     {
                         _isDragging = true;
-                        _hoveredWindow = null;
+                        _hoveredWindowPixelRect = null;
+                        _hoveredWindowDpiRect = null;
                     }
                 }
                 else if (_isSmartMode && !_isDragging)
                 {
-                    _hoveredWindow = _windows.Find(w => w.Bounds.Contains(_currentPoint));
+                    DetectWindowUnderCursor();
                 }
                 InvalidateVisual();
             };
@@ -1037,28 +958,79 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             MouseUp += (s, e) =>
             {
                 var rect = GetSelectionRect();
+                var dpi = VisualTreeHelper.GetDpi(this);
+
                 if (_isDragging && rect.Width > 5 && rect.Height > 5)
                 {
                     Close();
-                    var cropped = CropBitmap(_screenBitmap, rect);
+                    var cropPixelRect = new System.Drawing.Rectangle(
+                        (int)Math.Round(rect.X * dpi.DpiScaleX),
+                        (int)Math.Round(rect.Y * dpi.DpiScaleY),
+                        (int)Math.Round(rect.Width * dpi.DpiScaleX),
+                        (int)Math.Round(rect.Height * dpi.DpiScaleY)
+                    );
+                    var cropped = CropBitmap(_screenBitmap, cropPixelRect);
                     new QScreenEditorWindow(cropped).Show();
                 }
-                else if (_isSmartMode && _hoveredWindow.HasValue)
+                else if (_isSmartMode && _hoveredWindowPixelRect.HasValue)
                 {
                     Close();
-                    var targetWin = _hoveredWindow.Value;
-                    var isolatedBmp = WindowDetector.CaptureWindowFast(targetWin.Bounds);
-                    new QScreenEditorWindow(isolatedBmp).Show();
+                    var cropped = CropBitmap(_screenBitmap, _hoveredWindowPixelRect.Value);
+                    new QScreenEditorWindow(cropped).Show();
                 }
                 else if (rect.Width > 5 && rect.Height > 5)
                 {
                     Close();
-                    var cropped = CropBitmap(_screenBitmap, rect);
+                    var cropPixelRect = new System.Drawing.Rectangle(
+                        (int)Math.Round(rect.X * dpi.DpiScaleX),
+                        (int)Math.Round(rect.Y * dpi.DpiScaleY),
+                        (int)Math.Round(rect.Width * dpi.DpiScaleX),
+                        (int)Math.Round(rect.Height * dpi.DpiScaleY)
+                    );
+                    var cropped = CropBitmap(_screenBitmap, cropPixelRect);
                     new QScreenEditorWindow(cropped).Show();
                 }
             };
 
             KeyDown += (s, e) => { if (e.Key == Key.Escape) Close(); };
+        }
+
+        private void DetectWindowUnderCursor()
+        {
+            try
+            {
+                Win32.GetCursorPos(out var pt);
+                IntPtr hwnd = Win32.WindowFromPoint(pt);
+                if (hwnd == IntPtr.Zero) return;
+
+                IntPtr root = Win32.GetAncestor(hwnd, Win32.GA_ROOT);
+                if (root == IntPtr.Zero) root = hwnd;
+
+                var myHwnd = new WindowInteropHelper(this).Handle;
+                if (root == myHwnd) return;
+
+                Win32.RECT r;
+                if (Win32.DwmGetWindowAttribute(root, Win32.DWMWA_EXTENDED_FRAME_BOUNDS, out r, Marshal.SizeOf(typeof(Win32.RECT))) != 0 || (r.Right - r.Left <= 10))
+                {
+                    Win32.GetWindowRect(root, out r);
+                }
+
+                int w = r.Right - r.Left;
+                int h = r.Bottom - r.Top;
+
+                if (w > 40 && h > 40)
+                {
+                    var dpi = VisualTreeHelper.GetDpi(this);
+                    var vs = Forms.SystemInformation.VirtualScreen;
+
+                    int pixelX = r.Left - vs.Left;
+                    int pixelY = r.Top - vs.Top;
+
+                    _hoveredWindowPixelRect = new System.Drawing.Rectangle(pixelX, pixelY, w, h);
+                    _hoveredWindowDpiRect = new Rect(pixelX / dpi.DpiScaleX, pixelY / dpi.DpiScaleY, w / dpi.DpiScaleX, h / dpi.DpiScaleY);
+                }
+            }
+            catch { }
         }
 
         private Rect GetSelectionRect()
@@ -1070,13 +1042,18 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             return new Rect(x, y, w, h);
         }
 
-        private Bitmap CropBitmap(Bitmap src, Rect rect)
+        private Bitmap CropBitmap(Bitmap src, System.Drawing.Rectangle rect)
         {
-            var target = new Bitmap((int)rect.Width, (int)rect.Height);
+            int rx = Math.Max(0, Math.Min(rect.X, src.Width - 1));
+            int ry = Math.Max(0, Math.Min(rect.Y, src.Height - 1));
+            int rw = Math.Max(1, Math.Min(rect.Width, src.Width - rx));
+            int rh = Math.Max(1, Math.Min(rect.Height, src.Height - ry));
+
+            var target = new Bitmap(rw, rh, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(target))
             {
-                g.DrawImage(src, new System.Drawing.Rectangle(0, 0, (int)rect.Width, (int)rect.Height),
-                    (int)rect.X, (int)rect.Y, (int)rect.Width, (int)rect.Height, GraphicsUnit.Pixel);
+                g.DrawImage(src, new System.Drawing.Rectangle(0, 0, rw, rh),
+                    rx, ry, rw, rh, GraphicsUnit.Pixel);
             }
             return target;
         }
@@ -1086,10 +1063,9 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             base.OnRender(dc);
             dc.DrawRectangle(new SolidColorBrush(Color.FromArgb(90, 0, 0, 0)), null, new Rect(0, 0, ActualWidth, ActualHeight));
 
-            if (!_isDragging && _hoveredWindow.HasValue)
+            if (!_isDragging && _hoveredWindowDpiRect.HasValue)
             {
-                var win = _hoveredWindow.Value;
-                dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(40, 0, 120, 255)), new Pen(Brushes.DodgerBlue, 2.5), win.Bounds, 6, 6);
+                dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(40, 0, 120, 255)), new Pen(Brushes.DodgerBlue, 2.5), _hoveredWindowDpiRect.Value, 6, 6);
             }
 
             if (_isDragging)
@@ -1170,7 +1146,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = new SolidColorBrush(Color.FromRgb(24, 26, 32));
 
-            // Ограничиваем размер окна редактора рабочей областью экрана, чтобы шапка не улетала за границы
             var workArea = SystemParameters.WorkArea;
             Width = Math.Min(Math.Max(bitmap.Width + 120, 920), workArea.Width - 80);
             Height = Math.Min(Math.Max(bitmap.Height + 180, 560), workArea.Height - 80);
@@ -1731,7 +1706,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 }
                 else if (_selectedTool == "blur" && w > 5 && h > 5)
                 {
-                    var pixelated = PixelateRegion(_baseBitmap, new Rect(x, y, w, h), 12);
+                    var pixelated = PixelateRegion(_baseBitmap, new System.Drawing.Rectangle((int)x, (int)y, (int)w, (int)h), 12);
                     var img = new System.Windows.Controls.Image { Source = BitmapToImageSource(pixelated), Width = w, Height = h };
                     Canvas.SetLeft(img, x); Canvas.SetTop(img, y);
                     AddElement(img);
@@ -1748,26 +1723,31 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             }
         }
 
-        private Bitmap PixelateRegion(Bitmap src, Rect rect, int pixelSize)
+        private Bitmap PixelateRegion(Bitmap src, System.Drawing.Rectangle rect, int pixelSize)
         {
-            var cropped = new Bitmap((int)rect.Width, (int)rect.Height);
+            int rx = Math.Max(0, Math.Min(rect.X, src.Width - 1));
+            int ry = Math.Max(0, Math.Min(rect.Y, src.Height - 1));
+            int rw = Math.Max(1, Math.Min(rect.Width, src.Width - rx));
+            int rh = Math.Max(1, Math.Min(rect.Height, src.Height - ry));
+
+            var cropped = new Bitmap(rw, rh);
             using (var g = Graphics.FromImage(cropped))
             {
-                g.DrawImage(src, new System.Drawing.Rectangle(0, 0, (int)rect.Width, (int)rect.Height), (int)rect.X, (int)rect.Y, (int)rect.Width, (int)rect.Height, GraphicsUnit.Pixel);
+                g.DrawImage(src, new System.Drawing.Rectangle(0, 0, rw, rh), rx, ry, rw, rh, GraphicsUnit.Pixel);
             }
 
-            var small = new Bitmap(Math.Max(1, (int)rect.Width / pixelSize), Math.Max(1, (int)rect.Height / pixelSize));
+            var small = new Bitmap(Math.Max(1, rw / pixelSize), Math.Max(1, rh / pixelSize));
             using (var g = Graphics.FromImage(small))
             {
                 g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
                 g.DrawImage(cropped, 0, 0, small.Width, small.Height);
             }
 
-            var result = new Bitmap((int)rect.Width, (int)rect.Height);
+            var result = new Bitmap(rw, rh);
             using (var g = Graphics.FromImage(result))
             {
                 g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
-                g.DrawImage(small, 0, 0, result.Width, result.Height);
+                g.DrawImage(small, 0, 0, rw, rh);
             }
             return result;
         }
