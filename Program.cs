@@ -75,7 +75,7 @@ namespace QScreen
 
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.3.7";
+        public const string CurrentVersion = "9.3.8";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -245,6 +245,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
         [DllImport("user32.dll")]
         public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
         [DllImport("dwmapi.dll")]
         public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
@@ -296,22 +298,24 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
     public static class WindowDetector
     {
-        // Точный алгоритм обнаружения окон ShareX с фильтрацией фантомных окон DWMWA_CLOAKED
         public static List<WindowTarget> GetVisibleWindows(double dpiX, double dpiY, double vsLeft, double vsTop)
         {
             var list = new List<WindowTarget>();
+            uint currentPid = (uint)Process.GetCurrentProcess().Id;
 
             Win32.EnumWindows((hwnd, lParam) =>
             {
                 if (!Win32.IsWindowVisible(hwnd) || Win32.IsIconic(hwnd)) return true;
 
-                // Проверка на фантомные скрытые окна Windows 10/11
+                // Отсекаем только окна самого процесса QScreen по PID
+                Win32.GetWindowThreadProcessId(hwnd, out uint winPid);
+                if (winPid == currentPid) return true;
+
+                // Отсекаем невидимые фантомные UWP-слои Windows 10/11
                 if (Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0 && cloaked != 0)
                     return true;
 
                 int exStyle = Win32.GetWindowLong(hwnd, Win32.GWL_EXSTYLE);
-                IntPtr owner = Win32.GetWindow(hwnd, Win32.GW_OWNER);
-
                 if ((exStyle & Win32.WS_EX_TOOLWINDOW) != 0 && (exStyle & Win32.WS_EX_APPWINDOW) == 0)
                     return true;
 
@@ -330,13 +334,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     Win32.GetWindowText(hwnd, sb, 256);
                     var title = sb.ToString().Trim();
 
-                    if (title == "Program Manager" || title.Contains("QScreen")) return true;
+                    if (title == "Program Manager") return true;
 
-                    // Пиксели относительно VirtualScreen
                     int pxX = r.Left - (int)vsLeft;
                     int pxY = r.Top - (int)vsTop;
 
-                    // DIP координаты для оверлея
                     double dipX = pxX / dpiX;
                     double dipY = pxY / dpiY;
                     double dipW = w / dpiX;
@@ -937,7 +939,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.7)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.8)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -1004,11 +1006,19 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             WindowStyle = WindowStyle.None;
             Topmost = true;
             AllowsTransparency = true;
-            Background = Brushes.Transparent;
+            // Полупрозрачный фон с Alpha=1 для гарантированного перехвата кликов Windows
+            Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
             Cursor = Cursors.None;
+            Focusable = true;
+            ShowActivated = true;
 
             Loaded += (s, e) =>
             {
+                Activate();
+                Focus();
+                Keyboard.Focus(this);
+                CaptureMouse();
+
                 var dpi = VisualTreeHelper.GetDpi(this);
                 _dpiScaleX = dpi.DpiScaleX;
                 _dpiScaleY = dpi.DpiScaleY;
@@ -1018,6 +1028,23 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     var vs = Forms.SystemInformation.VirtualScreen;
                     _windows = WindowDetector.GetVisibleWindows(_dpiScaleX, _dpiScaleY, vs.Left, vs.Top);
                 }
+            };
+
+            // Гарантированная отмена по Escape
+            PreviewKeyDown += (s, e) =>
+            {
+                if (e.Key == Key.Escape)
+                {
+                    ReleaseMouseCapture();
+                    Close();
+                }
+            };
+
+            // Правый клик = отмена режима захвата
+            PreviewMouseRightButtonDown += (s, e) =>
+            {
+                ReleaseMouseCapture();
+                Close();
             };
 
             MouseDown += (s, e) =>
@@ -1044,7 +1071,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 }
                 else if (_isSmartMode && !_isDragging)
                 {
-                    // Ищем окно в порядке Z-Order (сверху вниз)
                     _hoveredWindow = _windows.FirstOrDefault(w => w.DipBounds.Contains(_currentPoint));
                 }
                 InvalidateVisual();
@@ -1052,6 +1078,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             MouseUp += (s, e) =>
             {
+                ReleaseMouseCapture();
                 var rect = GetSelectionRect();
 
                 if (_isDragging && rect.Width > 5 && rect.Height > 5)
@@ -1085,8 +1112,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     new QScreenEditorWindow(cropped).Show();
                 }
             };
-
-            KeyDown += (s, e) => { if (e.Key == Key.Escape) Close(); };
         }
 
         private Rect GetSelectionRect()
