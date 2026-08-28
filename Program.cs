@@ -75,7 +75,7 @@ namespace QScreen
 
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.3.9";
+        public const string CurrentVersion = "9.4.0";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -267,6 +267,9 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 
         public static readonly IntPtr HWND_TOP = IntPtr.Zero;
+        public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+
         public const uint SWP_NOMOVE = 0x0002;
         public const uint SWP_NOSIZE = 0x0001;
         public const uint SWP_SHOWWINDOW = 0x0040;
@@ -368,7 +371,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             return list;
         }
 
-        // Изолированный захват окна: выводим окно на передний план и снимаем его чистый кадр без наложения других окон
         public static Bitmap CaptureWindowIsolated(IntPtr hwnd, System.Drawing.Rectangle fallbackBounds, Bitmap fallbackBmp)
         {
             try
@@ -991,7 +993,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.3.9)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.4.0)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -1282,8 +1284,22 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Width = Math.Min(Math.Max(bitmap.Width + 120, 920), workArea.Width - 80);
             Height = Math.Min(Math.Max(bitmap.Height + 180, 560), workArea.Height - 80);
 
+            // Форсированный вывод окна редактора на передний план
+            Topmost = true;
+            ShowActivated = true;
+
             Win32.ApplyDarkMode(this);
             Icon = AppIconProvider.GetImageSource();
+
+            Loaded += (s, e) =>
+            {
+                Topmost = false;
+                var hwnd = new WindowInteropHelper(this).Handle;
+                Win32.SetForegroundWindow(hwnd);
+                Win32.SetWindowPos(hwnd, Win32.HWND_TOP, 0, 0, 0, 0, Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_SHOWWINDOW);
+                Activate();
+                Focus();
+            };
 
             InjectStyles();
             BuildUI();
@@ -1762,12 +1778,10 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             }
             else if (_selectedTool == "bubble")
             {
-                var border = new Border { Width = Math.Max(w, 100), Height = Math.Max(h, 45), CornerRadius = new CornerRadius(10), Background = new SolidColorBrush(Color.FromArgb(220, 20, 22, 28)), BorderBrush = new SolidColorBrush(_selectedColor), BorderThickness = new Thickness(2), Padding = new Thickness(6) };
-                var tb = new TextBox { Background = Brushes.Transparent, Foreground = Brushes.White, BorderThickness = new Thickness(0), FontSize = 14, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap, Text = "Текст..." };
-                border.Child = tb;
+                var border = new Border { Width = Math.Max(w, 80), Height = Math.Max(h, 40), CornerRadius = new CornerRadius(10), Background = new SolidColorBrush(Color.FromArgb(220, 20, 22, 28)), BorderBrush = new SolidColorBrush(_selectedColor), BorderThickness = new Thickness(2), Padding = new Thickness(8) };
                 Canvas.SetLeft(border, x); Canvas.SetTop(border, y);
-                AddElement(border);
-                tb.Focus();
+                _canvas.Children.Add(border);
+                _previewElement = border;
             }
         }
 
