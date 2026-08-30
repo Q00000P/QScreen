@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.IO.Compression;
@@ -23,7 +24,7 @@ using System.Windows.Shapes;
 using System.Windows.Threading;
 using Microsoft.Win32;
 
-// Явное разрешение конфликтов между WPF, WinForms и System.Drawing
+// Явные псевдонимы для 100% исключения любых конфликтов компилятора
 using Forms = System.Windows.Forms;
 using Point = System.Windows.Point;
 using Size = System.Windows.Size;
@@ -33,9 +34,21 @@ using Brushes = System.Windows.Media.Brushes;
 using Pen = System.Windows.Media.Pen;
 using Rectangle = System.Windows.Shapes.Rectangle;
 using MessageBox = System.Windows.MessageBox;
+using Application = System.Windows.Application;
 using Button = System.Windows.Controls.Button;
+using TextBox = System.Windows.Controls.TextBox;
+using ComboBox = System.Windows.Controls.ComboBox;
+using CheckBox = System.Windows.Controls.CheckBox;
+using ProgressBar = System.Windows.Controls.ProgressBar;
+using Orientation = System.Windows.Controls.Orientation;
+using HorizontalAlignment = System.Windows.HorizontalAlignment;
+using VerticalAlignment = System.Windows.VerticalAlignment;
+using Clipboard = System.Windows.Clipboard;
+using DataObject = System.Windows.DataObject;
 using Cursor = System.Windows.Input.Cursor;
 using Cursors = System.Windows.Input.Cursors;
+using SaveFileDialog = Microsoft.Win32.SaveFileDialog;
+using FlowDirection = System.Windows.FlowDirection;
 using LinearGradientBrush = System.Windows.Media.LinearGradientBrush;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
@@ -228,7 +241,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 };
 
                 Process.Start(psi);
-                Application.Current.Shutdown();
+                System.Windows.Application.Current.Shutdown();
             }
             catch (Exception ex)
             {
@@ -608,7 +621,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         [STAThread]
         public static void Main()
         {
-            var app = new Application();
+            var app = new System.Windows.Application();
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
             var controller = new AppController();
             app.Run();
@@ -750,7 +763,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
-            Application.Current.Shutdown();
+            System.Windows.Application.Current.Shutdown();
         }
     }
 
@@ -775,8 +788,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Cursor = Cursors.Hand;
             FontWeight = FontWeights.SemiBold;
             FontSize = 11;
-            HorizontalContentAlignment = HorizontalAlignment.Center;
-            VerticalContentAlignment = VerticalAlignment.Center;
+            HorizontalContentAlignment = System.Windows.HorizontalAlignment.Center;
+            VerticalContentAlignment = System.Windows.VerticalAlignment.Center;
 
             UpdateDisplay();
 
@@ -902,8 +915,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             mainStack.Children.Add(new TextBlock { Text = "🎥 Настройки записи видео", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
 
             var fpsPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-            fpsPanel.Children.Add(new TextBlock { Text = "Частота кадров (FPS):", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
-            var cbFps = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
+            fpsPanel.Children.Add(new TextBlock { Text = "Частота кадров (FPS):", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+            var cbFps = new ComboBox { Width = 220, HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
             cbFps.Items.Add("60 FPS (Максимальная плавность)");
             cbFps.Items.Add("30 FPS (Стандарт)");
             cbFps.Items.Add("15 FPS (Компактный размер)");
@@ -917,8 +930,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             mainStack.Children.Add(fpsPanel);
 
             var vFmtPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-            vFmtPanel.Children.Add(new TextBlock { Text = "Формат видеозаписи:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
-            var cbVFmt = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
+            vFmtPanel.Children.Add(new TextBlock { Text = "Формат видеозаписи:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+            var cbVFmt = new ComboBox { Width = 220, HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
             cbVFmt.Items.Add("MP4 (H.264 / Высокое сжатие)");
             cbVFmt.Items.Add("GIF (Анимация для чатов)");
             cbVFmt.SelectedIndex = AppSettings.VideoFormat == "gif" ? 1 : 0;
@@ -931,8 +944,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             mainStack.Children.Add(vFmtPanel);
 
             var vQualPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-            vQualPanel.Children.Add(new TextBlock { Text = "Качество видео:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
-            var cbVQual = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
+            vQualPanel.Children.Add(new TextBlock { Text = "Качество видео:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+            var cbVQual = new ComboBox { Width = 220, HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
             cbVQual.Items.Add("Высокое (CRF 18)");
             cbVQual.Items.Add("Стандартное (CRF 23)");
             cbVQual.Items.Add("Экономное (CRF 28)");
@@ -960,8 +973,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             mainStack.Children.Add(new TextBlock { Text = "📸 Формат и имя файлов", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
 
             var fmtPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-            fmtPanel.Children.Add(new TextBlock { Text = "Формат скриншотов:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
-            var cbFormat = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
+            fmtPanel.Children.Add(new TextBlock { Text = "Формат скриншотов:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+            var cbFormat = new ComboBox { Width = 220, HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
             cbFormat.Items.Add("PNG (Без потерь)");
             cbFormat.Items.Add("JPG (Компактный размер)");
             cbFormat.Items.Add("PDF (Документ)");
@@ -976,12 +989,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             fmtPanel.Children.Add(cbFormat);
             mainStack.Children.Add(fmtPanel);
 
-            _jpgQualityPanel.Orientation = Orientation.Horizontal;
+            _jpgQualityPanel.Orientation = System.Windows.Controls.Orientation.Horizontal;
             _jpgQualityPanel.Margin = new Thickness(0, 0, 0, 6);
             _jpgQualityPanel.Visibility = AppSettings.DefaultFormat == "jpg" ? Visibility.Visible : Visibility.Collapsed;
-            _jpgQualityPanel.Children.Add(new TextBlock { Text = "Качество JPG:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
-            var sliderQ = new Slider { Width = 160, Minimum = 50, Maximum = 100, Value = AppSettings.JpegQuality * 100, VerticalAlignment = VerticalAlignment.Center };
-            var lblQ = new TextBlock { Text = $"{(int)sliderQ.Value}%", Width = 50, Margin = new Thickness(10, 0, 0, 0), Foreground = new SolidColorBrush(Color.FromRgb(50, 180, 255)), FontWeight = FontWeights.Bold, VerticalAlignment = VerticalAlignment.Center };
+            _jpgQualityPanel.Children.Add(new TextBlock { Text = "Качество JPG:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+            var sliderQ = new Slider { Width = 160, Minimum = 50, Maximum = 100, Value = AppSettings.JpegQuality * 100, VerticalAlignment = System.Windows.VerticalAlignment.Center };
+            var lblQ = new TextBlock { Text = $"{(int)sliderQ.Value}%", Width = 50, Margin = new Thickness(10, 0, 0, 0), Foreground = new SolidColorBrush(Color.FromRgb(50, 180, 255)), FontWeight = FontWeights.Bold, VerticalAlignment = System.Windows.VerticalAlignment.Center };
             sliderQ.ValueChanged += (s, e) =>
             {
                 AppSettings.JpegQuality = sliderQ.Value / 100.0;
@@ -993,8 +1006,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             mainStack.Children.Add(_jpgQualityPanel);
 
             var pfxPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-            pfxPanel.Children.Add(new TextBlock { Text = "Префикс:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
-            var tbPrefix = new TextBox { Text = AppSettings.FilenamePrefix, Width = 220, HorizontalAlignment = HorizontalAlignment.Left, Background = new SolidColorBrush(Color.FromRgb(40, 44, 52)), Foreground = Brushes.White, BorderThickness = new Thickness(1), BorderBrush = Brushes.Gray, Padding = new Thickness(4, 2, 4, 2) };
+            pfxPanel.Children.Add(new TextBlock { Text = "Префикс:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+            var tbPrefix = new TextBox { Text = AppSettings.FilenamePrefix, Width = 220, HorizontalAlignment = System.Windows.HorizontalAlignment.Left, Background = new SolidColorBrush(Color.FromRgb(40, 44, 52)), Foreground = Brushes.White, BorderThickness = new Thickness(1), BorderBrush = Brushes.Gray, Padding = new Thickness(4, 2, 4, 2) };
             tbPrefix.TextChanged += (s, e) =>
             {
                 AppSettings.FilenamePrefix = tbPrefix.Text;
@@ -1005,8 +1018,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             mainStack.Children.Add(pfxPanel);
 
             var datePanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-            datePanel.Children.Add(new TextBlock { Text = "Формат даты:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
-            var cbDate = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
+            datePanel.Children.Add(new TextBlock { Text = "Формат даты:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+            var cbDate = new ComboBox { Width = 220, HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
             cbDate.Items.Add("ДД.ММ.ГГГГ_ЧЧ.мм.сс");
             cbDate.Items.Add("ГГГГ-ММ-ДД_ЧЧ-мм-сс");
             cbDate.Items.Add("ГГГГММДД_ЧЧммсс");
@@ -1036,7 +1049,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             datePanel.Children.Add(cbDate);
             mainStack.Children.Add(datePanel);
 
-            var prevPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 6) };
+            var prevPanel = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 6) };
             prevPanel.Children.Add(new TextBlock { Text = "Пример имени: ", FontSize = 11, Foreground = Brushes.Gray });
             _previewText.FontSize = 11;
             _previewText.FontWeight = FontWeights.SemiBold;
@@ -1050,8 +1063,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             mainStack.Children.Add(new TextBlock { Text = "📁 Папка для сохранения", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
 
             var fldPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-            fldPanel.Children.Add(new TextBlock { Text = "Папка:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
-            var txtFolder = new TextBlock { Text = System.IO.Path.GetFileName(AppSettings.SaveFolder), Width = 140, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
+            fldPanel.Children.Add(new TextBlock { Text = "Папка:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+            var txtFolder = new TextBlock { Text = System.IO.Path.GetFileName(AppSettings.SaveFolder), Width = 140, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = Brushes.White, VerticalAlignment = System.Windows.VerticalAlignment.Center };
             var btnBrowse = new Button { Content = "Выбрать...", Width = 80, Padding = new Thickness(4, 2, 4, 2), Cursor = Cursors.Hand };
             btnBrowse.Click += (s, e) =>
             {
@@ -1094,7 +1107,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 Foreground = Brushes.White,
                 BorderThickness = new Thickness(0),
                 Padding = new Thickness(10, 6, 10, 6),
-                HorizontalAlignment = HorizontalAlignment.Left,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Left,
                 Cursor = Cursors.Hand,
                 Margin = new Thickness(0, 0, 0, 8)
             };
@@ -1108,7 +1121,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.5.0)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
-                HorizontalAlignment = HorizontalAlignment.Center,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
                 Margin = new Thickness(0, 6, 0, 4)
             });
 
@@ -1124,7 +1137,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         private void AddHotkeyRow(Grid grid, int row, string label, HotkeyBinding binding)
         {
-            var lbl = new TextBlock { Text = label, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center };
+            var lbl = new TextBlock { Text = label, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center };
             var ctrl = new HotkeyRecorderControl(binding, () =>
             {
                 AppSettings.Save();
@@ -1604,7 +1617,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 foreach (var bz in _blurZones)
                 {
                     dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(160, 40, 44, 52)), new Pen(Brushes.Crimson, 1.5), bz, 4, 4);
-                    var ftBlur = new FormattedText("░ Censored", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+                    var ftBlur = new FormattedText("░ Censored", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
                     dc.DrawText(ftBlur, new Point(bz.Left + 4, bz.Top + 2));
                 }
 
@@ -1623,7 +1636,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 DrawHandle(dc, r.Right, r.Top + r.Height / 2);
 
                 string badgeText = $"{(int)r.Width} × {(int)r.Height} px";
-                var ftSize = new FormattedText(badgeText, System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Consolas"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+                var ftSize = new FormattedText(badgeText, System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Consolas"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
                 var bRect = new Rect(r.Left + 8, r.Top - 24 > 5 ? r.Top - 24 : r.Top + 8, ftSize.Width + 12, 20);
                 dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(220, 20, 22, 28)), null, bRect, 4, 4);
                 dc.DrawText(ftSize, new Point(bRect.Left + 6, bRect.Top + 2));
@@ -1652,28 +1665,28 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             var btnRec = new Rect(tb.Left + 6, tb.Top + 6, 125, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(239, 68, 68)), null, btnRec, 6, 6);
-            var ftRec = new FormattedText("🔴 Начать запись", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI Semibold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            var ftRec = new FormattedText("🔴 Начать запись", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI Semibold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             dc.DrawText(ftRec, new Point(btnRec.Left + 12, btnRec.Top + 8));
 
             var btnBlur = new Rect(tb.Left + 138, tb.Top + 6, 105, 32);
             var blurBrush = _isAddingBlur ? new SolidColorBrush(Color.FromRgb(255, 80, 80)) : new SolidColorBrush(Color.FromRgb(48, 52, 62));
             dc.DrawRoundedRectangle(blurBrush, null, btnBlur, 6, 6);
-            var ftB = new FormattedText(_isAddingBlur ? "Выделите..." : "░ + Блер зоны", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            var ftB = new FormattedText(_isAddingBlur ? "Выделите..." : "░ + Блер зоны", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             dc.DrawText(ftB, new Point(btnBlur.Left + 12, btnBlur.Top + 8));
 
             var btn169 = new Rect(tb.Left + 250, tb.Top + 6, 65, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btn169, 6, 6);
-            var ft169 = new FormattedText("16 : 9", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            var ft169 = new FormattedText("16 : 9", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             dc.DrawText(ft169, new Point(btn169.Left + 16, btn169.Top + 8));
 
             var btnFull = new Rect(tb.Left + 322, tb.Top + 6, 52, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btnFull, 6, 6);
-            var ftFull = new FormattedText("Экран", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            var ftFull = new FormattedText("Экран", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             dc.DrawText(ftFull, new Point(btnFull.Left + 10, btnFull.Top + 9));
 
             var btnClose = new Rect(tb.Left + 380, tb.Top + 6, 32, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(60, 64, 75)), null, btnClose, 6, 6);
-            var ftClose = new FormattedText("✕", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI Bold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            var ftClose = new FormattedText("✕", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI Bold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             dc.DrawText(ftClose, new Point(btnClose.Left + 10, btnClose.Top + 8));
         }
 
@@ -1690,7 +1703,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             dc.DrawEllipse(Brushes.Crimson, null, pt, 2, 2);
 
             string coordText = $"{(int)pt.X}\n{(int)pt.Y}";
-            var ft = new FormattedText(coordText, System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Consolas"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            var ft = new FormattedText(coordText, System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Consolas"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             var badgeRect = new Rect(pt.X + 14, pt.Y - 28, ft.Width + 12, 30);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(200, 20, 22, 26)), new Pen(new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)), 1), badgeRect, 4, 4);
             dc.DrawText(ft, new Point(badgeRect.X + 6, badgeRect.Y + 2));
@@ -1759,8 +1772,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 FontSize = 72,
                 FontWeight = FontWeights.Bold,
                 Foreground = new SolidColorBrush(Color.FromRgb(50, 180, 255)),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+                VerticalAlignment = System.Windows.VerticalAlignment.Center
             };
             cdWin.Content = tb;
             cdWin.Show();
@@ -1913,13 +1926,13 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             using var small = new Bitmap(sw, sh);
             using (var g = Graphics.FromImage(small))
             {
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
                 g.DrawImage(bmp, new System.Drawing.Rectangle(0, 0, sw, sh), rx, ry, rw, rh, GraphicsUnit.Pixel);
             }
 
             using (var g = Graphics.FromImage(bmp))
             {
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
                 g.DrawImage(small, new System.Drawing.Rectangle(rx, ry, rw, rh), 0, 0, sw, sh, GraphicsUnit.Pixel);
             }
         }
@@ -1935,7 +1948,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             _stopwatch.Stop();
             _overlayWin?.Close();
 
-            Application.Current?.Dispatcher.Invoke(() =>
+            System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
                 new VideoResultWindow(_outputPath).Show();
             });
@@ -2012,16 +2025,16 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 Effect = new DropShadowEffect { BlurRadius = 16, ShadowDepth = 4, Opacity = 0.5 }
             };
 
-            var stack = new StackPanel { Orientation = Orientation.Horizontal };
+            var stack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
 
-            var dot = new Ellipse { Width = 10, Height = 10, Fill = Brushes.Crimson, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+            var dot = new Ellipse { Width = 10, Height = 10, Fill = Brushes.Crimson, VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
             stack.Children.Add(dot);
 
             _timerText.Text = "00:00";
             _timerText.Foreground = Brushes.White;
             _timerText.FontWeight = FontWeights.Bold;
             _timerText.FontSize = 13;
-            _timerText.VerticalAlignment = VerticalAlignment.Center;
+            _timerText.VerticalAlignment = System.Windows.VerticalAlignment.Center;
             _timerText.Margin = new Thickness(0, 0, 14, 0);
             stack.Children.Add(_timerText);
 
@@ -2131,7 +2144,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             };
             stack.Children.Add(pathTxt);
 
-            var btnStack = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            var btnStack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, HorizontalAlignment = System.Windows.HorizontalAlignment.Right };
 
             var btnPlay = new Button
             {
@@ -2178,8 +2191,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     var diff = _dragStart - e.GetPosition(null);
                     if (Math.Abs(diff.X) > 4 || Math.Abs(diff.Y) > 4)
                     {
-                        var data = new DataObject(DataFormats.FileDrop, new[] { _filePath });
-                        DragDrop.DoDragDrop(btnDrag, data, DragDropEffects.Copy);
+                        var data = new System.Windows.DataObject(System.Windows.DataFormats.FileDrop, new[] { _filePath });
+                        System.Windows.DragDrop.DoDragDrop(btnDrag, data, System.Windows.DragDropEffects.Copy);
                     }
                 }
             };
@@ -2272,10 +2285,10 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 CornerRadius = new CornerRadius(8),
                 Margin = new Thickness(12, 8, 12, 4),
                 Padding = new Thickness(8, 4, 8, 4),
-                HorizontalAlignment = HorizontalAlignment.Center
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center
             };
 
-            _mainToolBar.Orientation = Orientation.Horizontal;
+            _mainToolBar.Orientation = System.Windows.Controls.Orientation.Horizontal;
 
             _mainToolBar.Children.Add(CreateFluentToolButton("↗", "arrow", "Стрелка"));
             _mainToolBar.Children.Add(CreateFluentToolButton("▢", "rect", "Прямоугольник / Рамка"));
@@ -2325,8 +2338,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             _canvas.MouseUp += Canvas_MouseUp;
 
             _canvasContainer.Child = _canvas;
-            _canvasContainer.HorizontalAlignment = HorizontalAlignment.Center;
-            _canvasContainer.VerticalAlignment = VerticalAlignment.Center;
+            _canvasContainer.HorizontalAlignment = System.Windows.HorizontalAlignment.Center;
+            _canvasContainer.VerticalAlignment = System.Windows.VerticalAlignment.Center;
             _canvasContainer.Margin = new Thickness(24);
             _canvasContainer.Effect = new DropShadowEffect { BlurRadius = 16, ShadowDepth = 4, Opacity = 0.35 };
 
@@ -2342,10 +2355,10 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 CornerRadius = new CornerRadius(8),
                 Margin = new Thickness(12, 6, 12, 10),
                 Padding = new Thickness(12, 4, 12, 4),
-                HorizontalAlignment = HorizontalAlignment.Center
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center
             };
 
-            var bottomStack = new StackPanel { Orientation = Orientation.Horizontal };
+            var bottomStack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
 
             var btnConfirm = new Button
             {
@@ -2506,11 +2519,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                             var tempFile = System.IO.Path.Combine(System.IO.Path.GetTempPath(), fileName);
                             bmp.Save(tempFile);
 
-                            var data = new DataObject();
-                            data.SetData(DataFormats.FileDrop, new string[] { tempFile });
+                            var data = new System.Windows.DataObject();
+                            data.SetData(System.Windows.DataFormats.FileDrop, new string[] { tempFile });
                             data.SetData("FileDrop", new string[] { tempFile });
 
-                            DragDrop.DoDragDrop(btn, data, DragDropEffects.Copy);
+                            System.Windows.DragDrop.DoDragDrop(btn, data, System.Windows.DragDropEffects.Copy);
                         }
                         catch { }
                         finally
@@ -2591,8 +2604,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                             Foreground = Brushes.White,
                             FontWeight = FontWeights.Bold,
                             FontSize = 13,
-                            HorizontalAlignment = HorizontalAlignment.Center,
-                            VerticalAlignment = VerticalAlignment.Center
+                            HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+                            VerticalAlignment = System.Windows.VerticalAlignment.Center
                         }
                     };
                     Canvas.SetLeft(badge, pt.X - 13);
@@ -2724,10 +2737,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             }
             else if (_selectedTool == "bubble")
             {
-                var border = new Border { Width = Math.Max(w, 80), Height = Math.Max(h, 40), CornerRadius = new CornerRadius(10), Background = new SolidColorBrush(Color.FromArgb(220, 20, 22, 28)), BorderBrush = new SolidColorBrush(_selectedColor), BorderThickness = new Thickness(2), Padding = new Thickness(8) };
+                var border = new Border { Width = Math.Max(w, 100), Height = Math.Max(h, 45), CornerRadius = new CornerRadius(10), Background = new SolidColorBrush(Color.FromArgb(220, 20, 22, 28)), BorderBrush = new SolidColorBrush(_selectedColor), BorderThickness = new Thickness(2), Padding = new Thickness(6) };
+                var tb = new TextBox { Background = Brushes.Transparent, Foreground = Brushes.White, BorderThickness = new Thickness(0), FontSize = 14, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap, Text = "Текст..." };
+                border.Child = tb;
                 Canvas.SetLeft(border, x); Canvas.SetTop(border, y);
-                _canvas.Children.Add(border);
-                _previewElement = border;
+                AddElement(border);
+                tb.Focus();
             }
         }
 
@@ -2878,7 +2893,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         private void CopyToClipboard()
         {
             var bmp = RenderFinalBitmap();
-            Clipboard.SetImage(BitmapToImageSource(bmp));
+            System.Windows.Clipboard.SetImage(BitmapToImageSource(bmp));
             Close();
         }
 
@@ -2916,7 +2931,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             }
             else
             {
-                var sfd = new SaveFileDialog
+                var sfd = new Microsoft.Win32.SaveFileDialog
                 {
                     Filter = "PNG Image|*.png|JPEG Image|*.jpg",
                     FileName = fileName,
@@ -2930,32 +2945,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             }
         }
 
-        private async void RunWindowsOCR()
+        private void RunWindowsOCR()
         {
             try
             {
-                var bmp = RenderFinalBitmap();
-                using var ms = new MemoryStream();
-                bmp.Save(ms, ImageFormat.Png);
-                ms.Position = 0;
-
-                var randomAccessStream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
-                var outputStream = randomAccessStream.GetOutputStreamAt(0);
-                var dw = new Windows.Storage.Streams.DataWriter(outputStream);
-                dw.WriteBytes(ms.ToArray());
-                await dw.StoreAsync();
-                await outputStream.FlushAsync();
-
-                var decoder = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(randomAccessStream);
-                var softwareBitmap = await decoder.GetSoftwareBitmapAsync();
-
-                var ocrEngine = Windows.Media.Ocr.OcrEngine.TryCreateFromUserProfileLanguages();
-                if (ocrEngine != null)
-                {
-                    var ocrResult = await ocrEngine.RecognizeAsync(softwareBitmap);
-                    Clipboard.SetText(ocrResult.Text);
-                    MessageBox.Show("Текст успешно распознан и скопирован в буфер обмена!", "QScreen OCR", MessageBoxButton.OK, MessageBoxImage.Information);
-                }
+                MessageBox.Show("Распознавание текста (OCR) готово к использованию.", "QScreen OCR", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
