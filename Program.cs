@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.IO.Compression;
@@ -18,12 +17,13 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using Microsoft.Win32;
+
+// Явное разрешение конфликтов между WPF, WinForms и System.Drawing
 using Forms = System.Windows.Forms;
 using Point = System.Windows.Point;
 using Size = System.Windows.Size;
@@ -33,13 +33,16 @@ using Brushes = System.Windows.Media.Brushes;
 using Pen = System.Windows.Media.Pen;
 using Rectangle = System.Windows.Shapes.Rectangle;
 using MessageBox = System.Windows.MessageBox;
-using DataFormats = System.Windows.DataFormats;
-using DragDropEffects = System.Windows.DragDropEffects;
-using DragEventArgs = System.Windows.DragEventArgs;
+using Button = System.Windows.Controls.Button;
+using Cursor = System.Windows.Input.Cursor;
+using Cursors = System.Windows.Input.Cursors;
+using LinearGradientBrush = System.Windows.Media.LinearGradientBrush;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 using MouseButtonEventArgs = System.Windows.Input.MouseButtonEventArgs;
-using Cursors = System.Windows.Input.Cursors;
+using DataFormats = System.Windows.DataFormats;
+using DragDropEffects = System.Windows.DragDropEffects;
+using DragEventArgs = System.Windows.DragEventArgs;
 
 namespace QScreen
 {
@@ -1910,13 +1913,13 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             using var small = new Bitmap(sw, sh);
             using (var g = Graphics.FromImage(small))
             {
-                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
                 g.DrawImage(bmp, new System.Drawing.Rectangle(0, 0, sw, sh), rx, ry, rw, rh, GraphicsUnit.Pixel);
             }
 
             using (var g = Graphics.FromImage(bmp))
             {
-                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
                 g.DrawImage(small, new System.Drawing.Rectangle(rx, ry, rw, rh), 0, 0, sw, sh, GraphicsUnit.Pixel);
             }
         }
