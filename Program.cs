@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.IO.Compression;
@@ -17,9 +18,11 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using Microsoft.Win32;
 using Forms = System.Windows.Forms;
 using Point = System.Windows.Point;
@@ -30,6 +33,13 @@ using Brushes = System.Windows.Media.Brushes;
 using Pen = System.Windows.Media.Pen;
 using Rectangle = System.Windows.Shapes.Rectangle;
 using MessageBox = System.Windows.MessageBox;
+using DataFormats = System.Windows.DataFormats;
+using DragDropEffects = System.Windows.DragDropEffects;
+using DragEventArgs = System.Windows.DragEventArgs;
+using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+using MouseEventArgs = System.Windows.Input.MouseEventArgs;
+using MouseButtonEventArgs = System.Windows.Input.MouseButtonEventArgs;
+using Cursors = System.Windows.Input.Cursors;
 
 namespace QScreen
 {
@@ -75,7 +85,7 @@ namespace QScreen
 
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.4.0";
+        public const string CurrentVersion = "9.5.0";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -253,6 +263,10 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
         [DllImport("user32.dll")]
         public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+        [DllImport("user32.dll")]
+        public static extern bool GetCursorInfo(out CURSORINFO pci);
+        [DllImport("user32.dll")]
+        public static extern bool DrawIcon(IntPtr hDC, int X, int Y, IntPtr hIcon);
 
         [DllImport("dwmapi.dll")]
         public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
@@ -265,6 +279,20 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT { public int x; public int y; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct CURSORINFO
+        {
+            public int cbSize;
+            public int flags;
+            public IntPtr hCursor;
+            public POINT ptScreenPos;
+        }
+
+        public const int CURSOR_SHOWING = 0x00000001;
 
         public static readonly IntPtr HWND_TOP = IntPtr.Zero;
         public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
@@ -468,6 +496,13 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public static bool DirectSave = false;
         public static bool ShowThumbnail = true;
 
+        // Настройки видео (как в macOS)
+        public static int VideoFps = 60;
+        public static string VideoQuality = "high"; // high, medium, low
+        public static string VideoFormat = "mp4";   // mp4, gif
+        public static bool RecordCursor = true;
+        public static bool VideoCountdown = true;
+
         static AppSettings() { Load(); }
 
         public static void Load()
@@ -494,6 +529,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                         else if (k == "SaveFolder" && System.IO.Directory.Exists(v)) SaveFolder = v;
                         else if (k == "DirectSave" && bool.TryParse(v, out var ds)) DirectSave = ds;
                         else if (k == "ShowThumbnail" && bool.TryParse(v, out var st)) ShowThumbnail = st;
+                        else if (k == "VideoFps" && int.TryParse(v, out var fps)) VideoFps = fps;
+                        else if (k == "VideoQuality") VideoQuality = v;
+                        else if (k == "VideoFormat") VideoFormat = v;
+                        else if (k == "RecordCursor" && bool.TryParse(v, out var rc)) RecordCursor = rc;
+                        else if (k == "VideoCountdown" && bool.TryParse(v, out var vc)) VideoCountdown = vc;
                     }
                 }
             }
@@ -519,7 +559,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     $"DateFormat={DateFormat}",
                     $"SaveFolder={SaveFolder}",
                     $"DirectSave={DirectSave}",
-                    $"ShowThumbnail={ShowThumbnail}"
+                    $"ShowThumbnail={ShowThumbnail}",
+                    $"VideoFps={VideoFps}",
+                    $"VideoQuality={VideoQuality}",
+                    $"VideoFormat={VideoFormat}",
+                    $"RecordCursor={RecordCursor}",
+                    $"VideoCountdown={VideoCountdown}"
                 };
                 System.IO.File.WriteAllLines(ConfigPath, lines);
             }
@@ -603,6 +648,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             cm.Items.Add($"🔲 Умный захват (Окно / Зона) ({AppSettings.HK_Smart.DisplayText})", null, (s, e) => StartSmartCapture());
             cm.Items.Add($"📜 Скролл-скриншот ({AppSettings.HK_Scroll.DisplayText})", null, (s, e) => StartScrollCapture());
             cm.Items.Add($"🖥 Весь экран ({AppSettings.HK_Screen.DisplayText})", null, (s, e) => StartScreenCapture());
+            cm.Items.Add($"🎥 Запись видео / GIF ({AppSettings.HK_Record.DisplayText})", null, (s, e) => StartVideoRecording());
             cm.Items.Add(new Forms.ToolStripSeparator());
             cm.Items.Add("🔄 Проверить обновления...", null, async (s, e) => await UpdateChecker.CheckForUpdatesAsync(isUserInitiated: true));
             cm.Items.Add("⚙ Настройки...", null, (s, e) => ShowSettings());
@@ -642,7 +688,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 else if (id == ID_HK_SMART) { StartSmartCapture(); handled = true; }
                 else if (id == ID_HK_SCROLL) { StartScrollCapture(); handled = true; }
                 else if (id == ID_HK_SCREEN) { StartScreenCapture(); handled = true; }
-                else if (id == ID_HK_RECORD) { StartAreaCapture(); handled = true; }
+                else if (id == ID_HK_RECORD) { StartVideoRecording(); handled = true; }
             }
             return IntPtr.Zero;
         }
@@ -661,25 +707,31 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public void StartAreaCapture()
         {
             var bmp = CaptureEntireScreen();
-            new QScreenOverlayWindow(bmp, isSmartMode: false).Show();
+            new QScreenOverlayWindow(bmp, isSmartMode: false, isVideoMode: false).Show();
         }
 
         public void StartSmartCapture()
         {
             var bmp = CaptureEntireScreen();
-            new QScreenOverlayWindow(bmp, isSmartMode: true).Show();
+            new QScreenOverlayWindow(bmp, isSmartMode: true, isVideoMode: false).Show();
         }
 
         public void StartScrollCapture()
         {
             var bmp = CaptureEntireScreen();
-            new QScreenOverlayWindow(bmp, isSmartMode: false).Show();
+            new QScreenOverlayWindow(bmp, isSmartMode: false, isVideoMode: false).Show();
         }
 
         public void StartScreenCapture()
         {
             var bmp = CaptureEntireScreen();
             new QScreenEditorWindow(bmp).Show();
+        }
+
+        public void StartVideoRecording()
+        {
+            var bmp = CaptureEntireScreen();
+            new QScreenOverlayWindow(bmp, isSmartMode: false, isVideoMode: true).Show();
         }
 
         public void ShowSettings()
@@ -810,9 +862,9 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public SettingsWindow(AppController controller)
         {
             _controller = controller;
-            Title = "Настройки";
-            Width = 530;
-            Height = 580;
+            Title = "Настройки QScreen";
+            Width = 540;
+            Height = 650;
             MaxHeight = SystemParameters.WorkArea.Height - 30;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = new SolidColorBrush(Color.FromRgb(28, 30, 36));
@@ -840,15 +892,74 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             AddHotkeyRow(gridHotkeys, 1, "Умный захват (Окно / Зона):", AppSettings.HK_Smart);
             AddHotkeyRow(gridHotkeys, 2, "Скролл-скриншот:", AppSettings.HK_Scroll);
             AddHotkeyRow(gridHotkeys, 3, "Весь экран:", AppSettings.HK_Screen);
-            AddHotkeyRow(gridHotkeys, 4, "Запись видео (Зона):", AppSettings.HK_Record);
+            AddHotkeyRow(gridHotkeys, 4, "Запись видео / GIF:", AppSettings.HK_Record);
 
             mainStack.Children.Add(gridHotkeys);
             mainStack.Children.Add(CreateDivider());
 
-            mainStack.Children.Add(new TextBlock { Text = "Формат и имя сохраняемых файлов", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
+            // Секция: Видео и GIF (как в macOS)
+            mainStack.Children.Add(new TextBlock { Text = "🎥 Настройки записи видео", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
+
+            var fpsPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            fpsPanel.Children.Add(new TextBlock { Text = "Частота кадров (FPS):", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
+            var cbFps = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
+            cbFps.Items.Add("60 FPS (Максимальная плавность)");
+            cbFps.Items.Add("30 FPS (Стандарт)");
+            cbFps.Items.Add("15 FPS (Компактный размер)");
+            cbFps.SelectedIndex = AppSettings.VideoFps switch { 30 => 1, 15 => 2, _ => 0 };
+            cbFps.SelectionChanged += (s, e) =>
+            {
+                AppSettings.VideoFps = cbFps.SelectedIndex switch { 1 => 30, 2 => 15, _ => 60 };
+                AppSettings.Save();
+            };
+            fpsPanel.Children.Add(cbFps);
+            mainStack.Children.Add(fpsPanel);
+
+            var vFmtPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            vFmtPanel.Children.Add(new TextBlock { Text = "Формат видеозаписи:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
+            var cbVFmt = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
+            cbVFmt.Items.Add("MP4 (H.264 / Высокое сжатие)");
+            cbVFmt.Items.Add("GIF (Анимация для чатов)");
+            cbVFmt.SelectedIndex = AppSettings.VideoFormat == "gif" ? 1 : 0;
+            cbVFmt.SelectionChanged += (s, e) =>
+            {
+                AppSettings.VideoFormat = cbVFmt.SelectedIndex == 1 ? "gif" : "mp4";
+                AppSettings.Save();
+            };
+            vFmtPanel.Children.Add(cbVFmt);
+            mainStack.Children.Add(vFmtPanel);
+
+            var vQualPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            vQualPanel.Children.Add(new TextBlock { Text = "Качество видео:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
+            var cbVQual = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
+            cbVQual.Items.Add("Высокое (CRF 18)");
+            cbVQual.Items.Add("Стандартное (CRF 23)");
+            cbVQual.Items.Add("Экономное (CRF 28)");
+            cbVQual.SelectedIndex = AppSettings.VideoQuality switch { "medium" => 1, "low" => 2, _ => 0 };
+            cbVQual.SelectionChanged += (s, e) =>
+            {
+                AppSettings.VideoQuality = cbVQual.SelectedIndex switch { 1 => "medium", 2 => "low", _ => "high" };
+                AppSettings.Save();
+            };
+            vQualPanel.Children.Add(cbVQual);
+            mainStack.Children.Add(vQualPanel);
+
+            var chkCursor = new CheckBox { Content = "Записывать курсор мыши", IsChecked = AppSettings.RecordCursor, Foreground = Brushes.White, Margin = new Thickness(0, 2, 0, 4) };
+            chkCursor.Checked += (s, e) => { AppSettings.RecordCursor = true; AppSettings.Save(); };
+            chkCursor.Unchecked += (s, e) => { AppSettings.RecordCursor = false; AppSettings.Save(); };
+            mainStack.Children.Add(chkCursor);
+
+            var chkCount = new CheckBox { Content = "Таймер обратного отсчета (3 сек) перед стартом", IsChecked = AppSettings.VideoCountdown, Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 6) };
+            chkCount.Checked += (s, e) => { AppSettings.VideoCountdown = true; AppSettings.Save(); };
+            chkCount.Unchecked += (s, e) => { AppSettings.VideoCountdown = false; AppSettings.Save(); };
+            mainStack.Children.Add(chkCount);
+
+            mainStack.Children.Add(CreateDivider());
+
+            mainStack.Children.Add(new TextBlock { Text = "📸 Формат и имя файлов", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
 
             var fmtPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-            fmtPanel.Children.Add(new TextBlock { Text = "Формат по умолчанию:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
+            fmtPanel.Children.Add(new TextBlock { Text = "Формат скриншотов:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
             var cbFormat = new ComboBox { Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
             cbFormat.Items.Add("PNG (Без потерь)");
             cbFormat.Items.Add("JPG (Компактный размер)");
@@ -935,7 +1046,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(CreateDivider());
 
-            mainStack.Children.Add(new TextBlock { Text = "Папка для сохранения", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
+            mainStack.Children.Add(new TextBlock { Text = "📁 Папка для сохранения", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
 
             var fldPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
             fldPanel.Children.Add(new TextBlock { Text = "Папка:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = VerticalAlignment.Center });
@@ -993,7 +1104,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.4.0)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.5.0)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -1035,23 +1146,52 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         }
     }
 
+    public enum HandleType
+    {
+        None,
+        Move,
+        TopLeft,
+        Top,
+        TopRight,
+        Right,
+        BottomRight,
+        Bottom,
+        BottomLeft,
+        Left
+    }
+
     public class QScreenOverlayWindow : Window
     {
         private Bitmap _screenBitmap;
         private bool _isSmartMode;
+        private bool _isVideoMode;
         private List<WindowTarget> _windows = new();
         private WindowTarget? _hoveredWindow;
 
+        private Rect _selectedRect;
+        private bool _hasSelectedZone = false;
         private Point _startPoint;
         private Point _currentPoint;
         private bool _isDragging = false;
+        private HandleType _activeHandle = HandleType.None;
+        private Point _handleDragStart;
+        private Rect _initialDragRect;
+
+        private List<Rect> _blurZones = new();
+        private bool _isAddingBlur = false;
+        private Point _blurStart;
+        private Rect _tempBlurRect;
+
         private double _dpiScaleX = 1.0;
         private double _dpiScaleY = 1.0;
 
-        public QScreenOverlayWindow(Bitmap screenBitmap, bool isSmartMode = false)
+        private const double HandleSize = 10.0;
+
+        public QScreenOverlayWindow(Bitmap screenBitmap, bool isSmartMode = false, bool isVideoMode = false)
         {
             _screenBitmap = screenBitmap;
             _isSmartMode = isSmartMode;
+            _isVideoMode = isVideoMode;
 
             Left = SystemParameters.VirtualScreenLeft;
             Top = SystemParameters.VirtualScreenTop;
@@ -1061,7 +1201,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Topmost = true;
             AllowsTransparency = true;
             Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
-            Cursor = Cursors.None;
+            Cursor = Cursors.Cross;
             Focusable = true;
             ShowActivated = true;
 
@@ -1081,6 +1221,18 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     var vs = Forms.SystemInformation.VirtualScreen;
                     _windows = WindowDetector.GetVisibleWindows(_dpiScaleX, _dpiScaleY, vs.Left, vs.Top);
                 }
+
+                if (_isVideoMode)
+                {
+                    // Начальная центрированная зона для видео (1280x720)
+                    double w = Math.Min(1280, Width * 0.7);
+                    double h = w * (9.0 / 16.0);
+                    double x = (Width - w) / 2;
+                    double y = (Height - h) / 2;
+                    _selectedRect = new Rect(x, y, w, h);
+                    _hasSelectedZone = true;
+                    InvalidateVisual();
+                }
             };
 
             PreviewKeyDown += (s, e) =>
@@ -1090,49 +1242,209 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     ReleaseMouseCapture();
                     Close();
                 }
+                else if (_isVideoMode && e.Key == Key.Enter && _hasSelectedZone)
+                {
+                    StartActualVideoRecording();
+                }
             };
 
             PreviewMouseRightButtonDown += (s, e) =>
             {
+                if (_isAddingBlur)
+                {
+                    _isAddingBlur = false;
+                    InvalidateVisual();
+                    return;
+                }
                 ReleaseMouseCapture();
                 Close();
             };
 
-            MouseDown += (s, e) =>
-            {
-                if (e.LeftButton == MouseButtonState.Pressed)
-                {
-                    _startPoint = e.GetPosition(this);
-                    _currentPoint = _startPoint;
-                    _isDragging = false;
-                    InvalidateVisual();
-                }
-            };
+            MouseDown += OnMouseDownHandler;
+            MouseMove += OnMouseMoveHandler;
+            MouseUp += OnMouseUpHandler;
+        }
 
-            MouseMove += (s, e) =>
+        private HandleType HitTestHandle(Point pt)
+        {
+            if (!_hasSelectedZone) return HandleType.None;
+
+            var r = _selectedRect;
+            double hs = HandleSize;
+
+            if (new Rect(r.Left - hs, r.Top - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.TopLeft;
+            if (new Rect(r.Right - hs, r.Top - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.TopRight;
+            if (new Rect(r.Left - hs, r.Bottom - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.BottomLeft;
+            if (new Rect(r.Right - hs, r.Bottom - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.BottomRight;
+
+            if (new Rect(r.Left + r.Width / 2 - hs, r.Top - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.Top;
+            if (new Rect(r.Left + r.Width / 2 - hs, r.Bottom - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.Bottom;
+            if (new Rect(r.Left - hs, r.Top + r.Height / 2 - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.Left;
+            if (new Rect(r.Right - hs, r.Top + r.Height / 2 - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.Right;
+
+            // Клик по кнопкам тулбара видео
+            if (_isVideoMode)
             {
-                _currentPoint = e.GetPosition(this);
-                if (e.LeftButton == MouseButtonState.Pressed)
+                var tbRect = GetToolbarRect();
+                if (tbRect.Contains(pt)) return HandleType.None;
+            }
+
+            if (r.Contains(pt)) return HandleType.Move;
+
+            return HandleType.None;
+        }
+
+        private Cursor GetCursorForHandle(HandleType ht)
+        {
+            return ht switch
+            {
+                HandleType.TopLeft or HandleType.BottomRight => Cursors.SizeNWSE,
+                HandleType.TopRight or HandleType.BottomLeft => Cursors.SizeNESW,
+                HandleType.Top or HandleType.Bottom => Cursors.SizeNS,
+                HandleType.Left or HandleType.Right => Cursors.SizeWE,
+                HandleType.Move => Cursors.SizeAll,
+                _ => Cursors.Cross
+            };
+        }
+
+        private Rect GetToolbarRect()
+        {
+            double tbW = 420;
+            double tbH = 44;
+            double tbX = _selectedRect.Left + (_selectedRect.Width - tbW) / 2;
+            double tbY = _selectedRect.Bottom + 12;
+
+            if (tbY + tbH > ActualHeight - 10)
+            {
+                tbY = _selectedRect.Top - tbH - 12;
+            }
+            return new Rect(tbX, tbY, tbW, tbH);
+        }
+
+        private void OnMouseDownHandler(object sender, MouseButtonEventArgs e)
+        {
+            if (e.LeftButton != MouseButtonState.Pressed) return;
+
+            var pt = e.GetPosition(this);
+
+            if (_isVideoMode)
+            {
+                var tbRect = GetToolbarRect();
+                if (tbRect.Contains(pt))
+                {
+                    HandleToolbarClick(pt, tbRect);
+                    return;
+                }
+            }
+
+            if (_isAddingBlur)
+            {
+                _blurStart = pt;
+                _tempBlurRect = new Rect(pt, pt);
+                _isDragging = true;
+                return;
+            }
+
+            var handle = HitTestHandle(pt);
+            if (handle != HandleType.None)
+            {
+                _activeHandle = handle;
+                _handleDragStart = pt;
+                _initialDragRect = _selectedRect;
+                _isDragging = true;
+                return;
+            }
+
+            _startPoint = pt;
+            _currentPoint = pt;
+            _isDragging = false;
+            InvalidateVisual();
+        }
+
+        private void OnMouseMoveHandler(object sender, MouseEventArgs e)
+        {
+            _currentPoint = e.GetPosition(this);
+
+            if (_isDragging)
+            {
+                if (_isAddingBlur)
+                {
+                    double bx = Math.Min(_blurStart.X, _currentPoint.X);
+                    double by = Math.Min(_blurStart.Y, _currentPoint.Y);
+                    double bw = Math.Abs(_blurStart.X - _currentPoint.X);
+                    double bh = Math.Abs(_blurStart.Y - _currentPoint.Y);
+                    _tempBlurRect = new Rect(bx, by, bw, bh);
+                }
+                else if (_activeHandle != HandleType.None)
+                {
+                    double dx = _currentPoint.X - _handleDragStart.X;
+                    double dy = _currentPoint.Y - _handleDragStart.Y;
+                    _selectedRect = CalculateNewRect(_initialDragRect, _activeHandle, dx, dy);
+                }
+                else
                 {
                     if (Math.Abs(_currentPoint.X - _startPoint.X) > 5 || Math.Abs(_currentPoint.Y - _startPoint.Y) > 5)
                     {
-                        _isDragging = true;
+                        double x = Math.Min(_startPoint.X, _currentPoint.X);
+                        double y = Math.Min(_startPoint.Y, _currentPoint.Y);
+                        double w = Math.Abs(_startPoint.X - _currentPoint.X);
+                        double h = Math.Abs(_startPoint.Y - _currentPoint.Y);
+                        _selectedRect = new Rect(x, y, w, h);
+                        _hasSelectedZone = true;
                         _hoveredWindow = null;
                     }
                 }
-                else if (_isSmartMode && !_isDragging)
+            }
+            else
+            {
+                if (_isSmartMode)
                 {
                     _hoveredWindow = _windows.FirstOrDefault(w => w.DipBounds.Contains(_currentPoint));
                 }
-                InvalidateVisual();
-            };
 
-            MouseUp += (s, e) =>
+                if (_isVideoMode || _hasSelectedZone)
+                {
+                    var ht = HitTestHandle(_currentPoint);
+                    Cursor = GetCursorForHandle(ht);
+                }
+                else
+                {
+                    Cursor = Cursors.Cross;
+                }
+            }
+
+            InvalidateVisual();
+        }
+
+        private void OnMouseUpHandler(object sender, MouseButtonEventArgs e)
+        {
+            if (_isAddingBlur)
+            {
+                if (_tempBlurRect.Width > 10 && _tempBlurRect.Height > 10)
+                {
+                    _blurZones.Add(_tempBlurRect);
+                }
+                _isAddingBlur = false;
+                _isDragging = false;
+                _tempBlurRect = Rect.Empty;
+                InvalidateVisual();
+                return;
+            }
+
+            if (_activeHandle != HandleType.None)
+            {
+                _activeHandle = HandleType.None;
+                _isDragging = false;
+                InvalidateVisual();
+                return;
+            }
+
+            if (!_isVideoMode)
             {
                 ReleaseMouseCapture();
-                var rect = GetSelectionRect();
+                var rect = _selectedRect;
 
-                if (_isDragging && rect.Width > 5 && rect.Height > 5)
+                if (_hasSelectedZone && rect.Width > 5 && rect.Height > 5)
                 {
                     Close();
                     var cropPixelRect = new System.Drawing.Rectangle(
@@ -1152,28 +1464,117 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     var cleanBmp = WindowDetector.CaptureWindowIsolated(targetHwnd, bounds, _screenBitmap);
                     new QScreenEditorWindow(cleanBmp).Show();
                 }
-                else if (rect.Width > 5 && rect.Height > 5)
-                {
-                    Close();
-                    var cropPixelRect = new System.Drawing.Rectangle(
-                        (int)Math.Round(rect.X * _dpiScaleX),
-                        (int)Math.Round(rect.Y * _dpiScaleY),
-                        (int)Math.Round(rect.Width * _dpiScaleX),
-                        (int)Math.Round(rect.Height * _dpiScaleY)
-                    );
-                    var cropped = CropBitmap(_screenBitmap, cropPixelRect);
-                    new QScreenEditorWindow(cropped).Show();
-                }
-            };
+            }
+            else
+            {
+                _isDragging = false;
+            }
         }
 
-        private Rect GetSelectionRect()
+        private Rect CalculateNewRect(Rect orig, HandleType ht, double dx, double dy)
         {
-            double x = Math.Min(_startPoint.X, _currentPoint.X);
-            double y = Math.Min(_startPoint.Y, _currentPoint.Y);
-            double w = Math.Abs(_startPoint.X - _currentPoint.X);
-            double h = Math.Abs(_startPoint.Y - _currentPoint.Y);
+            double x = orig.Left;
+            double y = orig.Top;
+            double w = orig.Width;
+            double h = orig.Height;
+
+            switch (ht)
+            {
+                case HandleType.Move:
+                    x += dx;
+                    y += dy;
+                    break;
+                case HandleType.TopLeft:
+                    x += dx; y += dy; w -= dx; h -= dy;
+                    break;
+                case HandleType.Top:
+                    y += dy; h -= dy;
+                    break;
+                case HandleType.TopRight:
+                    w += dx; y += dy; h -= dy;
+                    break;
+                case HandleType.Right:
+                    w += dx;
+                    break;
+                case HandleType.BottomRight:
+                    w += dx; h += dy;
+                    break;
+                case HandleType.Bottom:
+                    h += dy;
+                    break;
+                case HandleType.BottomLeft:
+                    x += dx; w -= dx; h += dy;
+                    break;
+                case HandleType.Left:
+                    x += dx; w -= dx;
+                    break;
+            }
+
+            if (w < 60) { w = 60; }
+            if (h < 40) { h = 40; }
+
             return new Rect(x, y, w, h);
+        }
+
+        private void HandleToolbarClick(Point pt, Rect tb)
+        {
+            double relX = pt.X - tb.Left;
+
+            // Кнопка 1: Старт записи [0..130]
+            if (relX >= 8 && relX <= 135)
+            {
+                StartActualVideoRecording();
+            }
+            // Кнопка 2: + Блер [140..240]
+            else if (relX >= 140 && relX <= 245)
+            {
+                _isAddingBlur = true;
+                InvalidateVisual();
+            }
+            // Кнопка 3: 16:9 Пресет [250..315]
+            else if (relX >= 250 && relX <= 315)
+            {
+                double nw = Math.Min(1280, Width * 0.8);
+                double nh = nw * (9.0 / 16.0);
+                _selectedRect = new Rect((Width - nw) / 2, (Height - nh) / 2, nw, nh);
+                InvalidateVisual();
+            }
+            // Кнопка 4: FullScreen [320..375]
+            else if (relX >= 320 && relX <= 375)
+            {
+                _selectedRect = new Rect(0, 0, ActualWidth, ActualHeight);
+                InvalidateVisual();
+            }
+            // Кнопка 5: Закрыть [380..415]
+            else if (relX >= 380 && relX <= 415)
+            {
+                ReleaseMouseCapture();
+                Close();
+            }
+        }
+
+        private void StartActualVideoRecording()
+        {
+            ReleaseMouseCapture();
+            Close();
+
+            var cropPixelRect = new System.Drawing.Rectangle(
+                (int)Math.Round(_selectedRect.X * _dpiScaleX),
+                (int)Math.Round(_selectedRect.Y * _dpiScaleY),
+                (int)Math.Round(_selectedRect.Width * _dpiScaleX),
+                (int)Math.Round(_selectedRect.Height * _dpiScaleY)
+            );
+
+            // Конвертируем относительные зоны блера в пиксельные координаты
+            var pixelBlurs = _blurZones.Select(bz => new System.Drawing.Rectangle(
+                (int)Math.Round((bz.X - _selectedRect.X) * _dpiScaleX),
+                (int)Math.Round((bz.Y - _selectedRect.Y) * _dpiScaleY),
+                (int)Math.Round(bz.Width * _dpiScaleX),
+                (int)Math.Round(bz.Height * _dpiScaleY)
+            )).ToList();
+
+            var recorder = new VideoRecorder(cropPixelRect, _selectedRect, pixelBlurs);
+            recorder.Start();
         }
 
         private Bitmap CropBitmap(Bitmap src, System.Drawing.Rectangle rect)
@@ -1186,8 +1587,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             var target = new Bitmap(rw, rh, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(target))
             {
-                g.DrawImage(src, new System.Drawing.Rectangle(0, 0, rw, rh),
-                    rx, ry, rw, rh, GraphicsUnit.Pixel);
+                g.DrawImage(src, new System.Drawing.Rectangle(0, 0, rw, rh), rx, ry, rw, rh, GraphicsUnit.Pixel);
             }
             return target;
         }
@@ -1197,18 +1597,101 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             base.OnRender(dc);
             dc.DrawRectangle(new SolidColorBrush(Color.FromArgb(90, 0, 0, 0)), null, new Rect(0, 0, ActualWidth, ActualHeight));
 
-            if (!_isDragging && _hoveredWindow != null)
+            if (!_isDragging && _hoveredWindow != null && _isSmartMode)
             {
                 dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(40, 0, 120, 255)), new Pen(Brushes.DodgerBlue, 2.5), _hoveredWindow.DipBounds, 6, 6);
             }
 
-            if (_isDragging)
+            if (_hasSelectedZone)
             {
-                var rect = GetSelectionRect();
-                dc.DrawRectangle(Brushes.Transparent, new Pen(Brushes.White, 1.5), rect);
-            }
+                var r = _selectedRect;
 
-            DrawReticle(dc, _currentPoint);
+                // Прозрачное окно в оверлее для выбранной зоны
+                dc.DrawRectangle(Brushes.Transparent, new Pen(new SolidColorBrush(Color.FromRgb(50, 180, 255)), 2), r);
+
+                // Отрисовка зон блера
+                foreach (var bz in _blurZones)
+                {
+                    dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(160, 40, 44, 52)), new Pen(Brushes.Crimson, 1.5), bz, 4, 4);
+                    var ftBlur = new FormattedText("░ Censored", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+                    dc.DrawText(ftBlur, new Point(bz.Left + 4, bz.Top + 2));
+                }
+
+                if (_isAddingBlur && !_tempBlurRect.IsEmpty)
+                {
+                    dc.DrawRectangle(new SolidColorBrush(Color.FromArgb(120, 255, 50, 80)), new Pen(Brushes.Red, 1.5), _tempBlurRect);
+                }
+
+                // Маркеры растяжки (8 точек)
+                DrawHandle(dc, r.Left, r.Top);
+                DrawHandle(dc, r.Right, r.Top);
+                DrawHandle(dc, r.Left, r.Bottom);
+                DrawHandle(dc, r.Right, r.Bottom);
+                DrawHandle(dc, r.Left + r.Width / 2, r.Top);
+                DrawHandle(dc, r.Left + r.Width / 2, r.Bottom);
+                DrawHandle(dc, r.Left, r.Top + r.Height / 2);
+                DrawHandle(dc, r.Right, r.Top + r.Height / 2);
+
+                // Бейдж с размерами зоны
+                string badgeText = $"{(int)r.Width} × {(int)r.Height} px";
+                var ftSize = new FormattedText(badgeText, System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Consolas"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+                var bRect = new Rect(r.Left + 8, r.Top - 24 > 5 ? r.Top - 24 : r.Top + 8, ftSize.Width + 12, 20);
+                dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(220, 20, 22, 28)), null, bRect, 4, 4);
+                dc.DrawText(ftSize, new Point(bRect.Left + 6, bRect.Top + 2));
+
+                if (_isVideoMode)
+                {
+                    DrawVideoToolbar(dc, GetToolbarRect());
+                }
+            }
+            else
+            {
+                DrawReticle(dc, _currentPoint);
+            }
+        }
+
+        private void DrawHandle(DrawingContext dc, double cx, double cy)
+        {
+            double hs = HandleSize;
+            var handleRect = new Rect(cx - hs / 2, cy - hs / 2, hs, hs);
+            dc.DrawRectangle(Brushes.White, new Pen(new SolidColorBrush(Color.FromRgb(36, 120, 220)), 1.5), handleRect);
+        }
+
+        private void DrawVideoToolbar(DrawingContext dc, Rect tb)
+        {
+            // Фоновая плашка тулбара
+            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(30, 32, 38)), new Pen(new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)), 1), tb, 8, 8);
+
+            // 1. Кнопка "Запись"
+            var btnRec = new Rect(tb.Left + 6, tb.Top + 6, 125, 32);
+            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(239, 68, 68)), null, btnRec, 6, 6);
+            var ftRec = new FormattedText("🔴 Начать запись", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI Semibold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            dc.DrawText(ftRec, new Point(btnRec.Left + 12, btnRec.Top + 8));
+
+            // 2. Кнопка "+ Блер"
+            var btnBlur = new Rect(tb.Left + 138, tb.Top + 6, 105, 32);
+            var blurBrush = _isAddingBlur ? new SolidColorBrush(Color.FromRgb(255, 80, 80)) : new SolidColorBrush(Color.FromRgb(48, 52, 62));
+            dc.DrawRoundedRectangle(blurBrush, null, btnBlur, 6, 6);
+            var ftB = new FormattedText(_isAddingBlur ? "Выделите..." : "░ + Блер зоны", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            dc.DrawText(ftB, new Point(btnBlur.Left + 12, btnBlur.Top + 8));
+
+            // 3. Пресет "16:9"
+            var btn169 = new Rect(tb.Left + 250, tb.Top + 6, 65, 32);
+            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btn169, 6, 6);
+            var ft169 = new FormattedText("16 : 9", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            dc.DrawText(ft169, new Point(btn169.Left + 16, btn169.Top + 8));
+
+            // 4. Пресет "Full"
+            var btnFull = new Rect(tb.Left + 322, tb.Top + 6, 52, 32);
+            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btnFull, 6, 6);
+            var ftFull = new FormattedText("Экран", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            dc.DrawText(ftFull, new Point(btnFull.Left + 10, btnFull.Top + 9));
+
+            // 5. Кнопка "✖"
+            var btnClose = new Rect(tb.Left + 380, tb.Top + 6, 32, 32);
+            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(60, 64, 75)), null, btnClose, 6, 6);
+            var ftClose = new FormattedText("✕", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI Bold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            dc.DrawText(ftClose, new Point(btnClose.Left + 10, btnClose.Top + 8));
         }
 
         private void DrawReticle(DrawingContext dc, Point pt)
@@ -1223,23 +1706,508 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             dc.DrawLine(whitePen, new Point(pt.X, pt.Y + 4), new Point(pt.X, pt.Y + 20));
             dc.DrawEllipse(Brushes.Crimson, null, pt, 2, 2);
 
-            string coordText = _isDragging 
-                ? $"W: {(int)GetSelectionRect().Width}\nH: {(int)GetSelectionRect().Height}"
-                : $"{(int)pt.X}\n{(int)pt.Y}";
-
-            var ft = new FormattedText(
-                coordText,
-                System.Globalization.CultureInfo.InvariantCulture,
-                FlowDirection.LeftToRight,
-                new Typeface("Consolas"),
-                10,
-                Brushes.White,
-                VisualTreeHelper.GetDpi(this).PixelsPerDip
-            );
-
+            string coordText = $"{(int)pt.X}\n{(int)pt.Y}";
+            var ft = new FormattedText(coordText, System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Consolas"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             var badgeRect = new Rect(pt.X + 14, pt.Y - 28, ft.Width + 12, 30);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(200, 20, 22, 26)), new Pen(new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)), 1), badgeRect, 4, 4);
             dc.DrawText(ft, new Point(badgeRect.X + 6, badgeRect.Y + 2));
+        }
+    }
+
+    public class VideoRecorder
+    {
+        private System.Drawing.Rectangle _pixelBounds;
+        private Rect _dipBounds;
+        private List<System.Drawing.Rectangle> _blurRegions;
+        private CancellationTokenSource _cts = new();
+        private Process? _ffmpegProcess;
+        private Stream? _ffmpegInput;
+        private string _outputPath = "";
+        private RecordingOverlayWindow? _overlayWin;
+        private bool _isPaused = false;
+        private Stopwatch _stopwatch = new();
+        private DispatcherTimer _timer = new();
+
+        public VideoRecorder(System.Drawing.Rectangle pixelBounds, Rect dipBounds, List<System.Drawing.Rectangle> blurRegions)
+        {
+            _pixelBounds = pixelBounds;
+            _dipBounds = dipBounds;
+            _blurRegions = blurRegions;
+
+            // Четные размеры для видеоэнкодеров H.264
+            if (_pixelBounds.Width % 2 != 0) _pixelBounds.Width--;
+            if (_pixelBounds.Height % 2 != 0) _pixelBounds.Height--;
+        }
+
+        public void Start()
+        {
+            var ext = AppSettings.VideoFormat == "gif" ? "gif" : "mp4";
+            _outputPath = System.IO.Path.Combine(AppSettings.SaveFolder, AppSettings.GenerateFileName(ext));
+
+            _overlayWin = new RecordingOverlayWindow(_dipBounds, this);
+            _overlayWin.Show();
+
+            if (AppSettings.VideoCountdown)
+            {
+                RunCountdownAndRecord();
+            }
+            else
+            {
+                BeginCaptureLoop();
+            }
+        }
+
+        private void RunCountdownAndRecord()
+        {
+            var cdWin = new Window
+            {
+                Width = 200,
+                Height = 200,
+                Left = _dipBounds.Left + (_dipBounds.Width - 200) / 2,
+                Top = _dipBounds.Top + (_dipBounds.Height - 200) / 2,
+                WindowStyle = WindowStyle.None,
+                AllowsTransparency = true,
+                Background = Brushes.Transparent,
+                Topmost = true,
+                ShowInTaskbar = false
+            };
+
+            var tb = new TextBlock
+            {
+                Text = "3",
+                FontSize = 72,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(Color.FromRgb(50, 180, 255)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            cdWin.Content = tb;
+            cdWin.Show();
+
+            int count = 3;
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            timer.Tick += (s, e) =>
+            {
+                count--;
+                if (count > 0)
+                {
+                    tb.Text = count.ToString();
+                }
+                else
+                {
+                    timer.Stop();
+                    cdWin.Close();
+                    BeginCaptureLoop();
+                }
+            };
+            timer.Start();
+        }
+
+        private void BeginCaptureLoop()
+        {
+            _stopwatch.Start();
+
+            string ffmpegPath = FindFfmpeg();
+            bool useFfmpeg = !string.IsNullOrEmpty(ffmpegPath);
+
+            int fps = AppSettings.VideoFps;
+            int width = _pixelBounds.Width;
+            int height = _pixelBounds.Height;
+
+            if (useFfmpeg)
+            {
+                string crf = AppSettings.VideoQuality switch { "medium" => "23", "low" => "28", _ => "18" };
+                string args = AppSettings.VideoFormat == "gif"
+                    ? $"-y -f rawvideo -vcodec rawvideo -s {width}x{height} -pix_fmt bgr24 -r {fps} -i - -vf \"fps={Math.Min(fps, 30)},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" \"{_outputPath}\""
+                    : $"-y -f rawvideo -vcodec rawvideo -s {width}x{height} -pix_fmt bgr24 -r {fps} -i - -c:v libx264 -preset ultrafast -crf {crf} -pix_fmt yuv420p \"{_outputPath}\"";
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = ffmpegPath,
+                    Arguments = args,
+                    UseShellExecute = false,
+                    RedirectStandardInput = true,
+                    CreateNoWindow = true
+                };
+                _ffmpegProcess = Process.Start(psi);
+                _ffmpegInput = _ffmpegProcess?.StandardInput.BaseStream;
+            }
+
+            Task.Run(() => CaptureWorker(fps, useFfmpeg, _cts.Token));
+        }
+
+        private string FindFfmpeg()
+        {
+            if (System.IO.File.Exists("ffmpeg.exe")) return "ffmpeg.exe";
+            var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+            foreach (var p in pathEnv.Split(';'))
+            {
+                var full = System.IO.Path.Combine(p.Trim(), "ffmpeg.exe");
+                if (System.IO.File.Exists(full)) return full;
+            }
+            return "";
+        }
+
+        private void CaptureWorker(int fps, bool useFfmpeg, CancellationToken token)
+        {
+            int intervalMs = 1000 / fps;
+            var frameBmp = new Bitmap(_pixelBounds.Width, _pixelBounds.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            var g = Graphics.FromImage(frameBmp);
+
+            var vs = Forms.SystemInformation.VirtualScreen;
+
+            while (!token.IsCancellationRequested)
+            {
+                var sw = Stopwatch.StartNew();
+
+                if (!_isPaused)
+                {
+                    g.CopyFromScreen(_pixelBounds.X + vs.Left, _pixelBounds.Y + vs.Top, 0, 0, new System.Drawing.Size(_pixelBounds.Width, _pixelBounds.Height), CopyPixelOperation.SourceCopy);
+
+                    // Отрисовка курсора
+                    if (AppSettings.RecordCursor)
+                    {
+                        if (Win32.GetCursorInfo(out var ci) && ci.flags == Win32.CURSOR_SHOWING)
+                        {
+                            int cx = ci.ptScreenPos.x - (_pixelBounds.X + vs.Left);
+                            int cy = ci.ptScreenPos.y - (_pixelBounds.Y + vs.Top);
+                            if (cx >= 0 && cx < _pixelBounds.Width && cy >= 0 && cy < _pixelBounds.Height)
+                            {
+                                Win32.DrawIcon(g.GetHdc(), cx, cy, ci.hCursor);
+                                g.ReleaseHdc();
+                            }
+                        }
+                    }
+
+                    // Применение цензуры / блера к кадрам
+                    foreach (var br in _blurRegions)
+                    {
+                        PixelateGraphics(frameBmp, br, 16);
+                    }
+
+                    // Отправка кадра в энкодер
+                    if (useFfmpeg && _ffmpegInput != null)
+                    {
+                        var data = frameBmp.LockBits(new System.Drawing.Rectangle(0, 0, _pixelBounds.Width, _pixelBounds.Height), ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                        int stride = data.Stride;
+                        int bytesTotal = stride * _pixelBounds.Height;
+                        byte[] buffer = new byte[bytesTotal];
+                        Marshal.Copy(data.Scan0, buffer, 0, bytesTotal);
+                        frameBmp.UnlockBits(data);
+
+                        try
+                        {
+                            _ffmpegInput.Write(buffer, 0, buffer.Length);
+                        }
+                        catch { break; }
+                    }
+                }
+
+                int elapsed = (int)sw.ElapsedMilliseconds;
+                int sleep = intervalMs - elapsed;
+                if (sleep > 0) Thread.Sleep(sleep);
+            }
+
+            g.Dispose();
+            frameBmp.Dispose();
+
+            if (_ffmpegInput != null)
+            {
+                try { _ffmpegInput.Flush(); _ffmpegInput.Close(); } catch { }
+            }
+            if (_ffmpegProcess != null)
+            {
+                _ffmpegProcess.WaitForExit(5000);
+            }
+        }
+
+        private void PixelateGraphics(Bitmap bmp, System.Drawing.Rectangle rect, int pixelSize)
+        {
+            int rx = Math.Max(0, Math.Min(rect.X, bmp.Width - 1));
+            int ry = Math.Max(0, Math.Min(rect.Y, bmp.Height - 1));
+            int rw = Math.Max(1, Math.Min(rect.Width, bmp.Width - rx));
+            int rh = Math.Max(1, Math.Min(rect.Height, bmp.Height - ry));
+
+            int sw = Math.Max(1, rw / pixelSize);
+            int sh = Math.Max(1, rh / pixelSize);
+
+            using var small = new Bitmap(sw, sh);
+            using (var g = Graphics.FromImage(small))
+            {
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.DrawImage(bmp, new System.Drawing.Rectangle(0, 0, sw, sh), rx, ry, rw, rh, GraphicsUnit.Pixel);
+            }
+
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.DrawImage(small, new System.Drawing.Rectangle(rx, ry, rw, rh), 0, 0, sw, sh, GraphicsUnit.Pixel);
+            }
+        }
+
+        public void Pause()
+        {
+            _isPaused = !_isPaused;
+        }
+
+        public void StopAndSave()
+        {
+            _cts.Cancel();
+            _stopwatch.Stop();
+            _overlayWin?.Close();
+
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                new VideoResultWindow(_outputPath).Show();
+            });
+        }
+
+        public void Cancel()
+        {
+            _cts.Cancel();
+            _stopwatch.Stop();
+            _overlayWin?.Close();
+            try { if (System.IO.File.Exists(_outputPath)) System.IO.File.Delete(_outputPath); } catch { }
+        }
+
+        public TimeSpan GetDuration() => _stopwatch.Elapsed;
+    }
+
+    public class RecordingOverlayWindow : Window
+    {
+        private Rect _zoneRect;
+        private VideoRecorder _recorder;
+        private TextBlock _timerText = new();
+        private DispatcherTimer _tickTimer = new();
+        private Button _btnPause = new();
+
+        public RecordingOverlayWindow(Rect zoneRect, VideoRecorder recorder)
+        {
+            _zoneRect = zoneRect;
+            _recorder = recorder;
+
+            Left = SystemParameters.VirtualScreenLeft;
+            Top = SystemParameters.VirtualScreenTop;
+            Width = SystemParameters.VirtualScreenWidth;
+            Height = SystemParameters.VirtualScreenHeight;
+            WindowStyle = WindowStyle.None;
+            Topmost = true;
+            AllowsTransparency = true;
+            Background = Brushes.Transparent;
+            ShowInTaskbar = false;
+
+            BuildUI();
+
+            _tickTimer.Interval = TimeSpan.FromMilliseconds(500);
+            _tickTimer.Tick += (s, e) =>
+            {
+                var dur = _recorder.GetDuration();
+                _timerText.Text = dur.ToString(@"mm\:ss");
+            };
+            _tickTimer.Start();
+        }
+
+        private void BuildUI()
+        {
+            var canvas = new Canvas();
+
+            // Подсветка границ записываемой области
+            var frame = new Rectangle
+            {
+                Width = _zoneRect.Width + 4,
+                Height = _zoneRect.Height + 4,
+                Stroke = new SolidColorBrush(Color.FromRgb(255, 45, 85)),
+                StrokeThickness = 2,
+                StrokeDashArray = new DoubleCollection { 4, 2 }
+            };
+            Canvas.SetLeft(frame, _zoneRect.Left - 2);
+            Canvas.SetTop(frame, _zoneRect.Top - 2);
+            canvas.Children.Add(frame);
+
+            // Плавающая панель управления
+            var bar = new Border
+            {
+                Background = new SolidColorBrush(Color.FromRgb(24, 26, 32)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(12, 6, 12, 6),
+                Effect = new DropShadowEffect { BlurRadius = 16, ShadowDepth = 4, Opacity = 0.5 }
+            };
+
+            var stack = new StackPanel { Orientation = Orientation.Horizontal };
+
+            var dot = new Ellipse { Width = 10, Height = 10, Fill = Brushes.Crimson, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+            stack.Children.Add(dot);
+
+            _timerText.Text = "00:00";
+            _timerText.Foreground = Brushes.White;
+            _timerText.FontWeight = FontWeights.Bold;
+            _timerText.FontSize = 13;
+            _timerText.VerticalAlignment = VerticalAlignment.Center;
+            _timerText.Margin = new Thickness(0, 0, 14, 0);
+            stack.Children.Add(_timerText);
+
+            _btnPause.Content = "⏸";
+            _btnPause.ToolTip = "Пауза";
+            _btnPause.Width = 30; _btnPause.Height = 28;
+            _btnPause.Background = new SolidColorBrush(Color.FromRgb(48, 52, 62));
+            _btnPause.Foreground = Brushes.White;
+            _btnPause.BorderThickness = new Thickness(0);
+            _btnPause.Margin = new Thickness(0, 0, 6, 0);
+            _btnPause.Cursor = Cursors.Hand;
+            _btnPause.Click += (s, e) =>
+            {
+                _recorder.Pause();
+                _btnPause.Content = _btnPause.Content.ToString() == "⏸" ? "▶" : "⏸";
+            };
+            stack.Children.Add(_btnPause);
+
+            var btnStop = new Button
+            {
+                Content = "⏹ Стоп и сохранить",
+                Background = new SolidColorBrush(Color.FromRgb(16, 185, 129)),
+                Foreground = Brushes.White,
+                FontWeight = FontWeights.Bold,
+                FontSize = 11,
+                Padding = new Thickness(10, 4, 10, 4),
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand
+            };
+            btnStop.Click += (s, e) => _recorder.StopAndSave();
+            stack.Children.Add(btnStop);
+
+            var btnCancel = new Button
+            {
+                Content = "✖",
+                ToolTip = "Отмена записи",
+                Width = 28; btnCancel.Height = 28;
+                btnCancel.Background = new SolidColorBrush(Color.FromRgb(60, 64, 75));
+                btnCancel.Foreground = Brushes.White;
+                btnCancel.BorderThickness = new Thickness(0);
+                btnCancel.Cursor = Cursors.Hand;
+            };
+            btnCancel.Click += (s, e) => _recorder.Cancel();
+            stack.Children.Add(btnCancel);
+
+            bar.Child = stack;
+
+            double barX = _zoneRect.Left + (_zoneRect.Width - 280) / 2;
+            double barY = _zoneRect.Bottom + 12;
+            if (barY + 50 > ActualHeight) barY = _zoneRect.Top - 50;
+
+            Canvas.SetLeft(bar, barX);
+            Canvas.SetTop(bar, barY);
+            canvas.Children.Add(bar);
+
+            Content = canvas;
+        }
+    }
+
+    public class VideoResultWindow : Window
+    {
+        private string _filePath;
+        private Point _dragStart;
+
+        public VideoResultWindow(string filePath)
+        {
+            _filePath = filePath;
+            Title = "Запись завершена — QScreen Studio";
+            Width = 440;
+            Height = 160;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            Background = new SolidColorBrush(Color.FromRgb(28, 30, 36));
+            Foreground = Brushes.White;
+            ResizeMode = ResizeMode.NoResize;
+            Topmost = true;
+
+            Win32.ApplyDarkMode(this);
+            Icon = AppIconProvider.GetImageSource();
+
+            BuildUI();
+        }
+
+        private void BuildUI()
+        {
+            var stack = new StackPanel { Margin = new Thickness(16) };
+
+            var header = new TextBlock
+            {
+                Text = "🎉 Видеозапись успешно сохранена!",
+                FontWeight = FontWeights.Bold,
+                FontSize = 13,
+                Foreground = new SolidColorBrush(Color.FromRgb(52, 199, 89)),
+                Margin = new Thickness(0, 0, 0, 6)
+            };
+            stack.Children.Add(header);
+
+            var pathTxt = new TextBlock
+            {
+                Text = System.IO.Path.GetFileName(_filePath),
+                Foreground = Brushes.LightGray,
+                FontSize = 11,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                Margin = new Thickness(0, 0, 0, 14)
+            };
+            stack.Children.Add(pathTxt);
+
+            var btnStack = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+
+            var btnPlay = new Button
+            {
+                Content = "▶ Открыть",
+                Background = new SolidColorBrush(Color.FromRgb(48, 52, 62)),
+                Foreground = Brushes.White,
+                Padding = new Thickness(12, 6, 12, 6),
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 8, 0),
+                Cursor = Cursors.Hand
+            };
+            btnPlay.Click += (s, e) => { Process.Start(new ProcessStartInfo(_filePath) { UseShellExecute = true }); Close(); };
+            btnStack.Children.Add(btnPlay);
+
+            var btnFolder = new Button
+            {
+                Content = "📁 В папке",
+                Background = new SolidColorBrush(Color.FromRgb(48, 52, 62)),
+                Foreground = Brushes.White,
+                Padding = new Thickness(12, 6, 12, 6),
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 8, 0),
+                Cursor = Cursors.Hand
+            };
+            btnFolder.Click += (s, e) => { Process.Start("explorer.exe", $"/select,\"{_filePath}\""); Close(); };
+            btnStack.Children.Add(btnFolder);
+
+            var btnDrag = new Button
+            {
+                Content = "🖐 Drag & Drop",
+                ToolTip = "Перетащите файл в Telegram / Discord",
+                Background = new SolidColorBrush(Color.FromRgb(36, 120, 220)),
+                Foreground = Brushes.White,
+                FontWeight = FontWeights.SemiBold,
+                Padding = new Thickness(14, 6, 14, 6),
+                BorderThickness = new Thickness(0),
+                Cursor = Cursors.Hand
+            };
+            btnDrag.PreviewMouseLeftButtonDown += (s, e) => _dragStart = e.GetPosition(null);
+            btnDrag.PreviewMouseMove += (s, e) =>
+            {
+                if (e.LeftButton == MouseButtonState.Pressed)
+                {
+                    var diff = _dragStart - e.GetPosition(null);
+                    if (Math.Abs(diff.X) > 4 || Math.Abs(diff.Y) > 4)
+                    {
+                        var data = new DataObject(DataFormats.FileDrop, new[] { _filePath });
+                        DragDrop.DoDragDrop(btnDrag, data, DragDropEffects.Copy);
+                    }
+                }
+            };
+            btnStack.Children.Add(btnDrag);
+
+            stack.Children.Add(btnStack);
+            Content = stack;
         }
     }
 
@@ -1284,7 +2252,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Width = Math.Min(Math.Max(bitmap.Width + 120, 920), workArea.Width - 80);
             Height = Math.Min(Math.Max(bitmap.Height + 180, 560), workArea.Height - 80);
 
-            // Форсированный вывод окна редактора на передний план
             Topmost = true;
             ShowActivated = true;
 
