@@ -761,7 +761,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         public void StartVideoRecording()
         {
-            // Открываем нативное интерактивное окно записи (как на macOS)
             var box = new VideoBoxWindow();
             box.Show();
             box.Activate();
@@ -1204,7 +1203,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
     {
         private Grid _mainGrid = new();
         private Border _frameBorder = new();
-        private Border _topToolbar = new();
         private Border _bottomBar = new();
         private TextBlock _sizeBadge = new();
         private Button _btnMic = new();
@@ -1218,20 +1216,14 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         private double _dpiScaleX = 1.0;
         private double _dpiScaleY = 1.0;
-        private double _vsLeft = 0;
-        private double _vsTop = 0;
 
         private bool _isResizing = false;
         private string _resizeDir = "";
-        private Point _resizeStartMouse;
+        private System.Drawing.Point _resizeStartMouse;
         private Rect _resizeStartBounds;
 
         public VideoBoxWindow()
         {
-            var vs = Forms.SystemInformation.VirtualScreen;
-            _vsLeft = vs.Left;
-            _vsTop = vs.Top;
-
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = Brushes.Transparent;
@@ -1254,10 +1246,10 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             var cursorPos = Forms.Cursor.Position;
             var currentScreen = Forms.Screen.FromPoint(cursorPos);
 
-            double monDipLeft = currentScreen.Bounds.Left;
-            double monDipTop = currentScreen.Bounds.Top;
-            double monDipWidth = currentScreen.Bounds.Width;
-            double monDipHeight = currentScreen.Bounds.Height;
+            double monDipLeft = currentScreen.Bounds.Left / _dpiScaleX;
+            double monDipTop = currentScreen.Bounds.Top / _dpiScaleY;
+            double monDipWidth = currentScreen.Bounds.Width / _dpiScaleX;
+            double monDipHeight = currentScreen.Bounds.Height / _dpiScaleY;
 
             double w = Math.Min(1280, monDipWidth * 0.75);
             double h = w * (9.0 / 16.0);
@@ -1535,8 +1527,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 if (_isResizing && _resizeDir == dir)
                 {
                     var currentMouse = Forms.Cursor.Position;
-                    double dx = currentMouse.X - _resizeStartMouse.X;
-                    double dy = currentMouse.Y - _resizeStartMouse.Y;
+                    double dx = (currentMouse.X - _resizeStartMouse.X) / _dpiScaleX;
+                    double dy = (currentMouse.Y - _resizeStartMouse.Y) / _dpiScaleY;
 
                     double nLeft = _resizeStartBounds.Left;
                     double nTop = _resizeStartBounds.Top;
@@ -1590,10 +1582,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         private void StartRecording()
         {
-            // Прячем тулбар перед записью
             _bottomBar.Visibility = Visibility.Collapsed;
-
-            // Рамка становится пульсирующей красной
             _frameBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(255, 45, 85));
 
             var recorder = new VideoRecorder(this);
@@ -1845,7 +1834,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             var ext = AppSettings.VideoFormat == "gif" ? "gif" : "mp4";
             _outputPath = System.IO.Path.Combine(AppSettings.SaveFolder, AppSettings.GenerateFileName(ext));
 
-            // Открываем перетаскиваемую контрольную панель
             _controlBarWin = new RecordingControlBarWindow(new Rect(_boxWindow.Left, _boxWindow.Top, _boxWindow.Width, _boxWindow.Height), this);
             _controlBarWin.Show();
 
@@ -1981,10 +1969,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
                 if (!_isPaused)
                 {
-                    // 1. Снимаем весь объединенный рабочий стол всех экранов
                     gFull.CopyFromScreen(vs.Left, vs.Top, 0, 0, new System.Drawing.Size(vs.Width, vs.Height), CopyPixelOperation.SourceCopy);
 
-                    // 2. Курсор мыши
                     if (AppSettings.RecordCursor)
                     {
                         var ci = new Win32.CURSORINFO { cbSize = Marshal.SizeOf<Win32.CURSORINFO>() };
@@ -2000,7 +1986,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                         }
                     }
 
-                    // 3. Блер зон (в глобальных координатах экрана)
                     if (_blurActive)
                     {
                         var blurs = _boxWindow.Dispatcher.Invoke(() => _boxWindow.GetCurrentBlurRegions());
@@ -2010,14 +1995,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                         }
                     }
 
-                    // 4. Динамический кроп рамки на лету (Zoom / Pan Camera)
                     var curBoxRect = _boxWindow.Dispatcher.Invoke(() => _boxWindow.GetCurrentScreenPixelBounds());
                     int cropX = Math.Max(0, Math.Min(curBoxRect.X - vs.Left, vs.Width - 10));
                     int cropY = Math.Max(0, Math.Min(curBoxRect.Y - vs.Top, vs.Height - 10));
                     int cropW = Math.Max(10, Math.Min(curBoxRect.Width, vs.Width - cropX));
                     int cropH = Math.Max(10, Math.Min(curBoxRect.Height, vs.Height - cropY));
 
-                    // Масштабируем динамический кроп в постоянный размер видеопотока
                     gOut.DrawImage(fullDesktopBmp, new System.Drawing.Rectangle(0, 0, _fixedOutputWidth, _fixedOutputHeight), cropX, cropY, cropW, cropH, GraphicsUnit.Pixel);
 
                     if (useFfmpeg && _ffmpegInput != null)
@@ -2133,8 +2116,10 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             double initLeft = zoneRect.Left + (zoneRect.Width - 460) / 2;
             double initTop = zoneRect.Bottom + 12;
-            if (initTop + 60 > SystemParameters.VirtualScreenHeight) initTop = zoneRect.Top - 60;
-            if (initLeft < 10) initLeft = 10;
+            if (initTop + 60 > SystemParameters.VirtualScreenHeight + SystemParameters.VirtualScreenTop) 
+                initTop = zoneRect.Top - 60;
+            if (initLeft < SystemParameters.VirtualScreenLeft + 10) 
+                initLeft = SystemParameters.VirtualScreenLeft + 10;
 
             Left = initLeft;
             Top = initTop;
@@ -2162,7 +2147,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 Effect = new DropShadowEffect { BlurRadius = 20, ShadowDepth = 6, Opacity = 0.65 }
             };
 
-            // Перетаскивание панели за любое место
             card.MouseDown += (s, e) =>
             {
                 if (e.LeftButton == MouseButtonState.Pressed) DragMove();
@@ -3051,14 +3035,14 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             var small = new Bitmap(sw, sh);
             using (var g = Graphics.FromImage(small))
             {
-                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
                 g.DrawImage(cropped, 0, 0, sw, sh);
             }
 
             var result = new Bitmap(rw, rh);
             using (var g = Graphics.FromImage(result))
             {
-                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
                 g.DrawImage(small, new System.Drawing.Rectangle(0, 0, rw, rh), 0, 0, sw, sh, GraphicsUnit.Pixel);
             }
             return result;
