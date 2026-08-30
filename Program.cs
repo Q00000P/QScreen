@@ -509,7 +509,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public static HotkeyBinding HK_Screen = new() { Name = "Screen", Modifiers = Win32.MOD_CONTROL | Win32.MOD_SHIFT, Key = 0x33, DisplayText = "Ctrl + Shift + 3" };
         public static HotkeyBinding HK_Record = new() { Name = "Record", Modifiers = Win32.MOD_CONTROL | Win32.MOD_SHIFT, Key = 0x35, DisplayText = "Ctrl + Shift + 5" };
 
-        public static string DefaultFormat = "png"; // png, jpg, pdf, heic, webp
+        public static string DefaultFormat = "png"; // png, jpg, heic, webp, pdf
         public static double JpegQuality = 0.85;
         public static string FilenamePrefix = "QScreen";
         public static string DateFormat = "dd.MM.yyyy_HH.mm.ss";
@@ -2335,7 +2335,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Width = Math.Min(Math.Max(bitmap.Width + 120, 920), workArea.Width - 80);
             Height = Math.Min(Math.Max(bitmap.Height + 180, 560), workArea.Height - 80);
 
-            // Редактор изменяет размер и перемещается
             ResizeMode = ResizeMode.CanResizeWithGrip;
             Topmost = true;
             ShowActivated = true;
@@ -2932,24 +2931,27 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             int rw = Math.Max(1, Math.Min(rect.Width, src.Width - rx));
             int rh = Math.Max(1, Math.Min(rect.Height, src.Height - ry));
 
+            int sw = Math.Max(1, rw / pixelSize);
+            int sh = Math.Max(1, rh / pixelSize);
+
             var cropped = new Bitmap(rw, rh);
             using (var g = Graphics.FromImage(cropped))
             {
                 g.DrawImage(src, new System.Drawing.Rectangle(0, 0, rw, rh), rx, ry, rw, rh, GraphicsUnit.Pixel);
             }
 
-            var small = new Bitmap(Math.Max(1, rw / pixelSize), Math.Max(1, rh / pixelSize));
+            var small = new Bitmap(sw, sh);
             using (var g = Graphics.FromImage(small))
             {
-                g.InterpolationMode = InterpolationMode.NearestNeighbor;
-                g.DrawImage(cropped, 0, 0, small.Width, small.Height);
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                g.DrawImage(cropped, 0, 0, sw, sh);
             }
 
             var result = new Bitmap(rw, rh);
             using (var g = Graphics.FromImage(result))
             {
-                g.InterpolationMode = InterpolationMode.NearestNeighbor;
-                g.DrawImage(small, new System.Drawing.Rectangle(rx, ry, rw, rh), 0, 0, sw, sh, GraphicsUnit.Pixel);
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                g.DrawImage(small, new System.Drawing.Rectangle(0, 0, rw, rh), 0, 0, sw, sh, GraphicsUnit.Pixel);
             }
             return result;
         }
