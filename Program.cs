@@ -264,7 +264,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         [DllImport("user32.dll")]
         public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
         [DllImport("user32.dll")]
-        public static extern bool GetCursorInfo(out CURSORINFO pci);
+        public static extern bool GetCursorInfo(ref CURSORINFO pci);
         [DllImport("user32.dll")]
         public static extern bool DrawIcon(IntPtr hDC, int X, int Y, IntPtr hIcon);
 
@@ -496,10 +496,9 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public static bool DirectSave = false;
         public static bool ShowThumbnail = true;
 
-        // Настройки видео (как в macOS)
         public static int VideoFps = 60;
-        public static string VideoQuality = "high"; // high, medium, low
-        public static string VideoFormat = "mp4";   // mp4, gif
+        public static string VideoQuality = "high";
+        public static string VideoFormat = "mp4";
         public static bool RecordCursor = true;
         public static bool VideoCountdown = true;
 
@@ -897,7 +896,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             mainStack.Children.Add(gridHotkeys);
             mainStack.Children.Add(CreateDivider());
 
-            // Секция: Видео и GIF (как в macOS)
             mainStack.Children.Add(new TextBlock { Text = "🎥 Настройки записи видео", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
 
             var fpsPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
@@ -1224,7 +1222,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
                 if (_isVideoMode)
                 {
-                    // Начальная центрированная зона для видео (1280x720)
                     double w = Math.Min(1280, Width * 0.7);
                     double h = w * (9.0 / 16.0);
                     double x = (Width - w) / 2;
@@ -1282,7 +1279,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             if (new Rect(r.Left - hs, r.Top + r.Height / 2 - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.Left;
             if (new Rect(r.Right - hs, r.Top + r.Height / 2 - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.Right;
 
-            // Клик по кнопкам тулбара видео
             if (_isVideoMode)
             {
                 var tbRect = GetToolbarRect();
@@ -1520,18 +1516,15 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             double relX = pt.X - tb.Left;
 
-            // Кнопка 1: Старт записи [0..130]
             if (relX >= 8 && relX <= 135)
             {
                 StartActualVideoRecording();
             }
-            // Кнопка 2: + Блер [140..240]
             else if (relX >= 140 && relX <= 245)
             {
                 _isAddingBlur = true;
                 InvalidateVisual();
             }
-            // Кнопка 3: 16:9 Пресет [250..315]
             else if (relX >= 250 && relX <= 315)
             {
                 double nw = Math.Min(1280, Width * 0.8);
@@ -1539,13 +1532,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 _selectedRect = new Rect((Width - nw) / 2, (Height - nh) / 2, nw, nh);
                 InvalidateVisual();
             }
-            // Кнопка 4: FullScreen [320..375]
             else if (relX >= 320 && relX <= 375)
             {
                 _selectedRect = new Rect(0, 0, ActualWidth, ActualHeight);
                 InvalidateVisual();
             }
-            // Кнопка 5: Закрыть [380..415]
             else if (relX >= 380 && relX <= 415)
             {
                 ReleaseMouseCapture();
@@ -1565,7 +1556,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 (int)Math.Round(_selectedRect.Height * _dpiScaleY)
             );
 
-            // Конвертируем относительные зоны блера в пиксельные координаты
             var pixelBlurs = _blurZones.Select(bz => new System.Drawing.Rectangle(
                 (int)Math.Round((bz.X - _selectedRect.X) * _dpiScaleX),
                 (int)Math.Round((bz.Y - _selectedRect.Y) * _dpiScaleY),
@@ -1606,10 +1596,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             {
                 var r = _selectedRect;
 
-                // Прозрачное окно в оверлее для выбранной зоны
                 dc.DrawRectangle(Brushes.Transparent, new Pen(new SolidColorBrush(Color.FromRgb(50, 180, 255)), 2), r);
 
-                // Отрисовка зон блера
                 foreach (var bz in _blurZones)
                 {
                     dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(160, 40, 44, 52)), new Pen(Brushes.Crimson, 1.5), bz, 4, 4);
@@ -1622,7 +1610,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     dc.DrawRectangle(new SolidColorBrush(Color.FromArgb(120, 255, 50, 80)), new Pen(Brushes.Red, 1.5), _tempBlurRect);
                 }
 
-                // Маркеры растяжки (8 точек)
                 DrawHandle(dc, r.Left, r.Top);
                 DrawHandle(dc, r.Right, r.Top);
                 DrawHandle(dc, r.Left, r.Bottom);
@@ -1632,7 +1619,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 DrawHandle(dc, r.Left, r.Top + r.Height / 2);
                 DrawHandle(dc, r.Right, r.Top + r.Height / 2);
 
-                // Бейдж с размерами зоны
                 string badgeText = $"{(int)r.Width} × {(int)r.Height} px";
                 var ftSize = new FormattedText(badgeText, System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Consolas"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
                 var bRect = new Rect(r.Left + 8, r.Top - 24 > 5 ? r.Top - 24 : r.Top + 8, ftSize.Width + 12, 20);
@@ -1659,35 +1645,29 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         private void DrawVideoToolbar(DrawingContext dc, Rect tb)
         {
-            // Фоновая плашка тулбара
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(30, 32, 38)), new Pen(new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)), 1), tb, 8, 8);
 
-            // 1. Кнопка "Запись"
             var btnRec = new Rect(tb.Left + 6, tb.Top + 6, 125, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(239, 68, 68)), null, btnRec, 6, 6);
             var ftRec = new FormattedText("🔴 Начать запись", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI Semibold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             dc.DrawText(ftRec, new Point(btnRec.Left + 12, btnRec.Top + 8));
 
-            // 2. Кнопка "+ Блер"
             var btnBlur = new Rect(tb.Left + 138, tb.Top + 6, 105, 32);
             var blurBrush = _isAddingBlur ? new SolidColorBrush(Color.FromRgb(255, 80, 80)) : new SolidColorBrush(Color.FromRgb(48, 52, 62));
             dc.DrawRoundedRectangle(blurBrush, null, btnBlur, 6, 6);
             var ftB = new FormattedText(_isAddingBlur ? "Выделите..." : "░ + Блер зоны", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             dc.DrawText(ftB, new Point(btnBlur.Left + 12, btnBlur.Top + 8));
 
-            // 3. Пресет "16:9"
             var btn169 = new Rect(tb.Left + 250, tb.Top + 6, 65, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btn169, 6, 6);
             var ft169 = new FormattedText("16 : 9", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             dc.DrawText(ft169, new Point(btn169.Left + 16, btn169.Top + 8));
 
-            // 4. Пресет "Full"
             var btnFull = new Rect(tb.Left + 322, tb.Top + 6, 52, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btnFull, 6, 6);
             var ftFull = new FormattedText("Экран", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             dc.DrawText(ftFull, new Point(btnFull.Left + 10, btnFull.Top + 9));
 
-            // 5. Кнопка "✖"
             var btnClose = new Rect(tb.Left + 380, tb.Top + 6, 32, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(60, 64, 75)), null, btnClose, 6, 6);
             var ftClose = new FormattedText("✕", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI Bold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
@@ -1726,7 +1706,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         private RecordingOverlayWindow? _overlayWin;
         private bool _isPaused = false;
         private Stopwatch _stopwatch = new();
-        private DispatcherTimer _timer = new();
 
         public VideoRecorder(System.Drawing.Rectangle pixelBounds, Rect dipBounds, List<System.Drawing.Rectangle> blurRegions)
         {
@@ -1734,7 +1713,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             _dipBounds = dipBounds;
             _blurRegions = blurRegions;
 
-            // Четные размеры для видеоэнкодеров H.264
             if (_pixelBounds.Width % 2 != 0) _pixelBounds.Width--;
             if (_pixelBounds.Height % 2 != 0) _pixelBounds.Height--;
         }
@@ -1864,10 +1842,10 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 {
                     g.CopyFromScreen(_pixelBounds.X + vs.Left, _pixelBounds.Y + vs.Top, 0, 0, new System.Drawing.Size(_pixelBounds.Width, _pixelBounds.Height), CopyPixelOperation.SourceCopy);
 
-                    // Отрисовка курсора
                     if (AppSettings.RecordCursor)
                     {
-                        if (Win32.GetCursorInfo(out var ci) && ci.flags == Win32.CURSOR_SHOWING)
+                        var ci = new Win32.CURSORINFO { cbSize = Marshal.SizeOf<Win32.CURSORINFO>() };
+                        if (Win32.GetCursorInfo(ref ci) && ci.flags == Win32.CURSOR_SHOWING)
                         {
                             int cx = ci.ptScreenPos.x - (_pixelBounds.X + vs.Left);
                             int cy = ci.ptScreenPos.y - (_pixelBounds.Y + vs.Top);
@@ -1879,13 +1857,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                         }
                     }
 
-                    // Применение цензуры / блера к кадрам
                     foreach (var br in _blurRegions)
                     {
                         PixelateGraphics(frameBmp, br, 16);
                     }
 
-                    // Отправка кадра в энкодер
                     if (useFfmpeg && _ffmpegInput != null)
                     {
                         var data = frameBmp.LockBits(new System.Drawing.Rectangle(0, 0, _pixelBounds.Width, _pixelBounds.Height), ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
@@ -1956,7 +1932,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             _stopwatch.Stop();
             _overlayWin?.Close();
 
-            Application.Current.Dispatcher.Invoke(() =>
+            Application.Current?.Dispatcher.Invoke(() =>
             {
                 new VideoResultWindow(_outputPath).Show();
             });
@@ -2011,7 +1987,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             var canvas = new Canvas();
 
-            // Подсветка границ записываемой области
             var frame = new Rectangle
             {
                 Width = _zoneRect.Width + 4,
@@ -2024,7 +1999,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Canvas.SetTop(frame, _zoneRect.Top - 2);
             canvas.Children.Add(frame);
 
-            // Плавающая панель управления
             var bar = new Border
             {
                 Background = new SolidColorBrush(Color.FromRgb(24, 26, 32)),
@@ -2050,7 +2024,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             _btnPause.Content = "⏸";
             _btnPause.ToolTip = "Пауза";
-            _btnPause.Width = 30; _btnPause.Height = 28;
+            _btnPause.Width = 30;
+            _btnPause.Height = 28;
             _btnPause.Background = new SolidColorBrush(Color.FromRgb(48, 52, 62));
             _btnPause.Foreground = Brushes.White;
             _btnPause.BorderThickness = new Thickness(0);
@@ -2082,11 +2057,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             {
                 Content = "✖",
                 ToolTip = "Отмена записи",
-                Width = 28; btnCancel.Height = 28;
-                btnCancel.Background = new SolidColorBrush(Color.FromRgb(60, 64, 75));
-                btnCancel.Foreground = Brushes.White;
-                btnCancel.BorderThickness = new Thickness(0);
-                btnCancel.Cursor = Cursors.Hand;
+                Width = 28,
+                Height = 28,
+                Background = new SolidColorBrush(Color.FromRgb(60, 64, 75)),
+                Foreground = Brushes.White,
+                BorderThickness = new Thickness(0),
+                Cursor = Cursors.Hand
             };
             btnCancel.Click += (s, e) => _recorder.Cancel();
             stack.Children.Add(btnCancel);
