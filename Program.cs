@@ -202,7 +202,7 @@ namespace QScreen
             progressWin.Icon = AppIconProvider.GetImageSource();
 
             var panel = new StackPanel { Margin = new Thickness(16) };
-            var lbl = new TextBlock { Text = $"Загрузка QScreen v{newVer}...", Foreground = Brushes.White, Margin = new Thickness(0, 0, 10), FontWeight = FontWeights.SemiBold };
+            var lbl = new TextBlock { Text = $"Загрузка QScreen v{newVer}...", Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 10), FontWeight = FontWeights.SemiBold };
             var pb = new ProgressBar { Height = 14, IsIndeterminate = true, Background = new SolidColorBrush(Color.FromRgb(40, 44, 52)), Foreground = new SolidColorBrush(Color.FromRgb(50, 180, 255)) };
             panel.Children.Add(lbl);
             panel.Children.Add(pb);
@@ -2853,14 +2853,14 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             var small = new Bitmap(Math.Max(1, rw / pixelSize), Math.Max(1, rh / pixelSize));
             using (var g = Graphics.FromImage(small))
             {
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
                 g.DrawImage(cropped, 0, 0, small.Width, small.Height);
             }
 
             var result = new Bitmap(rw, rh);
             using (var g = Graphics.FromImage(result))
             {
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
                 g.DrawImage(small, 0, 0, result.Width, result.Height);
             }
             return result;
