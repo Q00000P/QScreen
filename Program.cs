@@ -106,7 +106,7 @@ namespace QScreen
 
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.6.0";
+        public const string CurrentVersion = "9.7.0";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -283,6 +283,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         [DllImport("user32.dll")]
         public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
         [DllImport("user32.dll")]
+        public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+        [DllImport("user32.dll")]
         public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
         [DllImport("user32.dll")]
         public static extern bool GetCursorInfo(ref CURSORINFO pci);
@@ -332,6 +334,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public const uint GW_OWNER = 4;
         public const int GWL_STYLE = -16;
         public const int GWL_EXSTYLE = -20;
+        public const int WS_EX_TRANSPARENT = 0x00000020;
+        public const int WS_EX_LAYERED = 0x00080000;
         public const int WS_EX_TOOLWINDOW = 0x00000080;
         public const int WS_EX_APPWINDOW = 0x00040000;
 
@@ -1151,7 +1155,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.6.0)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.7.0)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
@@ -1879,8 +1883,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         private Process? _ffmpegProcess;
         private Stream? _ffmpegInput;
         private string _outputPath = "";
-        private RecordingOverlayWindow? _overlayWin;
+        private RecordingFrameWindow? _frameWin;
+        private RecordingControlBarWindow? _controlBarWin;
         private bool _isPaused = false;
+        private bool _blurActive = true;
+        private bool _audioActive = false;
         private Stopwatch _stopwatch = new();
 
         public VideoRecorder(System.Drawing.Rectangle pixelBounds, Rect dipBounds, List<System.Drawing.Rectangle> blurRegions)
@@ -1888,6 +1895,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             _pixelBounds = pixelBounds;
             _dipBounds = dipBounds;
             _blurRegions = blurRegions;
+            _audioActive = AppSettings.RecordAudio;
 
             if (_pixelBounds.Width % 2 != 0) _pixelBounds.Width--;
             if (_pixelBounds.Height % 2 != 0) _pixelBounds.Height--;
@@ -1898,8 +1906,13 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             var ext = AppSettings.VideoFormat == "gif" ? "gif" : "mp4";
             _outputPath = System.IO.Path.Combine(AppSettings.SaveFolder, AppSettings.GenerateFileName(ext));
 
-            _overlayWin = new RecordingOverlayWindow(_dipBounds, this);
-            _overlayWin.Show();
+            // Открываем отдельную сквозную рамку вокруг области записи (не перехватывает клики!)
+            _frameWin = new RecordingFrameWindow(_dipBounds);
+            _frameWin.Show();
+
+            // Открываем перетаскиваемую плавающую панель с живыми кнопками
+            _controlBarWin = new RecordingControlBarWindow(_dipBounds, this);
+            _controlBarWin.Show();
 
             if (AppSettings.VideoCountdown)
             {
@@ -1972,8 +1985,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             {
                 string crf = AppSettings.VideoQuality switch { "medium" => "23", "low" => "28", _ => "18" };
                 string codecArg = AppSettings.VideoCodec == "h265" ? "libx265" : "libx264";
-
-                string audioArgs = AppSettings.RecordAudio ? "-f dshow -i audio=\"default\" " : "";
+                string audioArgs = _audioActive ? "-f dshow -i audio=\"default\" " : "";
 
                 string args = AppSettings.VideoFormat == "gif"
                     ? $"-y -f rawvideo -vcodec rawvideo -s {width}x{height} -pix_fmt bgr24 -r {fps} -i - -vf \"fps={Math.Min(fps, 30)},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" \"{_outputPath}\""
@@ -2047,9 +2059,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                         }
                     }
 
-                    foreach (var br in _blurRegions)
+                    if (_blurActive)
                     {
-                        PixelateGraphics(frameBmp, br, 16);
+                        foreach (var br in _blurRegions)
+                        {
+                            PixelateGraphics(frameBmp, br, 16);
+                        }
                     }
 
                     if (useFfmpeg && _ffmpegInput != null)
@@ -2111,16 +2126,16 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             }
         }
 
-        public void Pause()
-        {
-            _isPaused = !_isPaused;
-        }
+        public void Pause() => _isPaused = !_isPaused;
+        public bool ToggleBlur() { _blurActive = !_blurActive; return _blurActive; }
+        public bool ToggleAudio() { _audioActive = !_audioActive; return _audioActive; }
 
         public void StopAndSave()
         {
             _cts.Cancel();
             _stopwatch.Stop();
-            _overlayWin?.Close();
+            _frameWin?.Close();
+            _controlBarWin?.Close();
 
             System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
@@ -2132,38 +2147,75 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             _cts.Cancel();
             _stopwatch.Stop();
-            _overlayWin?.Close();
+            _frameWin?.Close();
+            _controlBarWin?.Close();
             try { if (System.IO.File.Exists(_outputPath)) System.IO.File.Delete(_outputPath); } catch { }
         }
 
         public TimeSpan GetDuration() => _stopwatch.Elapsed;
     }
 
-    public class RecordingOverlayWindow : Window
+    // Сквозная рамка вокруг области записи (клики проходят сквозь нее на рабочий стол!)
+    public class RecordingFrameWindow : Window
     {
-        private Rect _zoneRect;
+        public RecordingFrameWindow(Rect zoneRect)
+        {
+            Left = zoneRect.Left - 2;
+            Top = zoneRect.Top - 2;
+            Width = zoneRect.Width + 4;
+            Height = zoneRect.Height + 4;
+            WindowStyle = WindowStyle.None;
+            AllowsTransparency = true;
+            Background = Brushes.Transparent;
+            Topmost = true;
+            ShowInTaskbar = false;
+
+            var border = new Border
+            {
+                BorderBrush = new SolidColorBrush(Color.FromRgb(255, 45, 85)),
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(4),
+                Background = Brushes.Transparent
+            };
+            Content = border;
+
+            Loaded += (s, e) =>
+            {
+                var hwnd = new WindowInteropHelper(this).Handle;
+                int exStyle = Win32.GetWindowLong(hwnd, Win32.GWL_EXSTYLE);
+                Win32.SetWindowLong(hwnd, Win32.GWL_EXSTYLE, exStyle | Win32.WS_EX_TRANSPARENT | Win32.WS_EX_LAYERED | Win32.WS_EX_TOOLWINDOW);
+            };
+        }
+    }
+
+    // Плавающая и перетаскиваемая контрольная панель прямо во время записи видео
+    public class RecordingControlBarWindow : Window
+    {
         private VideoRecorder _recorder;
         private TextBlock _timerText = new();
         private DispatcherTimer _tickTimer = new();
         private Button _btnPause = new();
-        private Border _bar = new();
-        private Point _barOffset;
-        private bool _isBarDragging = false;
+        private Button _btnBlur = new();
+        private Button _btnMic = new();
 
-        public RecordingOverlayWindow(Rect zoneRect, VideoRecorder recorder)
+        public RecordingControlBarWindow(Rect zoneRect, VideoRecorder recorder)
         {
-            _zoneRect = zoneRect;
             _recorder = recorder;
 
-            Left = SystemParameters.VirtualScreenLeft;
-            Top = SystemParameters.VirtualScreenTop;
-            Width = SystemParameters.VirtualScreenWidth;
-            Height = SystemParameters.VirtualScreenHeight;
             WindowStyle = WindowStyle.None;
-            Topmost = true;
             AllowsTransparency = true;
             Background = Brushes.Transparent;
+            Topmost = true;
             ShowInTaskbar = false;
+            SizeToContent = SizeToContent.WidthAndHeight;
+
+            double initLeft = zoneRect.Left + (zoneRect.Width - 460) / 2;
+            double initTop = zoneRect.Bottom + 12;
+            if (initTop + 60 > SystemParameters.VirtualScreenHeight) initTop = zoneRect.Top - 60;
+            if (initLeft < 10) initLeft = 10;
+
+            Left = initLeft;
+            Top = initTop;
 
             BuildUI();
 
@@ -2178,77 +2230,62 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         private void BuildUI()
         {
-            var canvas = new Canvas();
-
-            var frame = new Rectangle
+            var card = new Border
             {
-                Width = _zoneRect.Width + 4,
-                Height = _zoneRect.Height + 4,
-                Stroke = new SolidColorBrush(Color.FromRgb(255, 45, 85)),
-                StrokeThickness = 2,
-                StrokeDashArray = new DoubleCollection { 4, 2 }
-            };
-            Canvas.SetLeft(frame, _zoneRect.Left - 2);
-            Canvas.SetTop(frame, _zoneRect.Top - 2);
-            canvas.Children.Add(frame);
-
-            _bar = new Border
-            {
-                Background = new SolidColorBrush(Color.FromRgb(24, 26, 32)),
-                BorderBrush = new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)),
+                Background = new SolidColorBrush(Color.FromRgb(26, 28, 34)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(90, 255, 255, 255)),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(10),
-                Padding = new Thickness(12, 6, 12, 6),
-                Cursor = Cursors.SizeAll,
-                Effect = new DropShadowEffect { BlurRadius = 16, ShadowDepth = 4, Opacity = 0.5 }
+                Padding = new Thickness(10, 6, 10, 6),
+                Effect = new DropShadowEffect { BlurRadius = 20, ShadowDepth = 6, Opacity = 0.65 }
             };
 
-            _bar.MouseDown += (s, e) =>
+            // Перетаскивание панели за любое место
+            card.MouseDown += (s, e) =>
             {
-                if (e.LeftButton == MouseButtonState.Pressed)
-                {
-                    _isBarDragging = true;
-                    _barOffset = e.GetPosition(_bar);
-                    _bar.CaptureMouse();
-                }
-            };
-            _bar.MouseMove += (s, e) =>
-            {
-                if (_isBarDragging)
-                {
-                    var pt = e.GetPosition(canvas);
-                    Canvas.SetLeft(_bar, pt.X - _barOffset.X);
-                    Canvas.SetTop(_bar, pt.Y - _barOffset.Y);
-                }
-            };
-            _bar.MouseUp += (s, e) =>
-            {
-                _isBarDragging = false;
-                _bar.ReleaseMouseCapture();
+                if (e.LeftButton == MouseButtonState.Pressed) DragMove();
             };
 
             var stack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
 
-            var dot = new Ellipse { Width = 10, Height = 10, Fill = Brushes.Crimson, VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+            // Ручка перетаскивания (Grip)
+            var grip = new TextBlock
+            {
+                Text = "⠿",
+                FontSize = 16,
+                Foreground = Brushes.Gray,
+                VerticalAlignment = System.Windows.VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 0),
+                Cursor = Cursors.SizeAll
+            };
+            stack.Children.Add(grip);
+
+            // Пульсирующий индикатор записи
+            var dot = new Ellipse { Width = 10, Height = 10, Fill = Brushes.Crimson, VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
             stack.Children.Add(dot);
 
+            // Таймер
             _timerText.Text = "00:00";
             _timerText.Foreground = Brushes.White;
             _timerText.FontWeight = FontWeights.Bold;
             _timerText.FontSize = 13;
             _timerText.VerticalAlignment = System.Windows.VerticalAlignment.Center;
-            _timerText.Margin = new Thickness(0, 0, 14, 0);
+            _timerText.Margin = new Thickness(0, 0, 10, 0);
             stack.Children.Add(_timerText);
 
-            _btnPause.Content = "⏸";
-            _btnPause.ToolTip = "Пауза";
-            _btnPause.Width = 30;
-            _btnPause.Height = 28;
-            _btnPause.Background = new SolidColorBrush(Color.FromRgb(48, 52, 62));
-            _btnPause.Foreground = Brushes.White;
-            _btnPause.BorderThickness = new Thickness(0);
-            _btnPause.Margin = new Thickness(0, 0, 6, 0);
-            _btnPause.Cursor = Cursors.Hand;
+            // 1. Пауза
+            _btnPause = new Button
+            {
+                Content = "⏸",
+                ToolTip = "Пауза / Продолжить",
+                Width = 32,
+                Height = 28,
+                Background = new SolidColorBrush(Color.FromRgb(48, 52, 62)),
+                Foreground = Brushes.White,
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand
+            };
             _btnPause.Click += (s, e) =>
             {
                 _recorder.Pause();
@@ -2256,6 +2293,51 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             };
             stack.Children.Add(_btnPause);
 
+            // 2. Блер на лету (ВКЛ / ВЫКЛ)
+            _btnBlur = new Button
+            {
+                Content = "░ Блер: ВКЛ",
+                ToolTip = "Включить / выключить размытие зон цензуры в реальном времени",
+                Background = new SolidColorBrush(Color.FromRgb(255, 60, 80)),
+                Foreground = Brushes.White,
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 11,
+                Padding = new Thickness(8, 4, 8, 4),
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand
+            };
+            _btnBlur.Click += (s, e) =>
+            {
+                bool active = _recorder.ToggleBlur();
+                _btnBlur.Content = active ? "░ Блер: ВКЛ" : "░ Блер: ВЫКЛ";
+                _btnBlur.Background = active ? new SolidColorBrush(Color.FromRgb(255, 60, 80)) : new SolidColorBrush(Color.FromRgb(48, 52, 62));
+            };
+            stack.Children.Add(_btnBlur);
+
+            // 3. Микрофон на лету (ВКЛ / ВЫКЛ)
+            _btnMic = new Button
+            {
+                Content = AppSettings.RecordAudio ? "🎙 Мик: ВКЛ" : "🔇 Мик: ВЫКЛ",
+                ToolTip = "Включить / отключить звук микрофона прямо во время записи",
+                Background = AppSettings.RecordAudio ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(48, 52, 62)),
+                Foreground = Brushes.White,
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 11,
+                Padding = new Thickness(8, 4, 8, 4),
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand
+            };
+            _btnMic.Click += (s, e) =>
+            {
+                bool active = _recorder.ToggleAudio();
+                _btnMic.Content = active ? "🎙 Мик: ВКЛ" : "🔇 Мик: ВЫКЛ";
+                _btnMic.Background = active ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(48, 52, 62));
+            };
+            stack.Children.Add(_btnMic);
+
+            // 4. Стоп и сохранить
             var btnStop = new Button
             {
                 Content = "⏹ Стоп и сохранить",
@@ -2271,6 +2353,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             btnStop.Click += (s, e) => _recorder.StopAndSave();
             stack.Children.Add(btnStop);
 
+            // 5. Отмена
             var btnCancel = new Button
             {
                 Content = "✖",
@@ -2285,17 +2368,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             btnCancel.Click += (s, e) => _recorder.Cancel();
             stack.Children.Add(btnCancel);
 
-            _bar.Child = stack;
-
-            double barX = _zoneRect.Left + (_zoneRect.Width - 280) / 2;
-            double barY = _zoneRect.Bottom + 12;
-            if (barY + 50 > ActualHeight) barY = _zoneRect.Top - 50;
-
-            Canvas.SetLeft(_bar, barX);
-            Canvas.SetTop(_bar, barY);
-            canvas.Children.Add(_bar);
-
-            Content = canvas;
+            card.Child = stack;
+            Content = card;
         }
     }
 
@@ -2446,6 +2520,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Width = Math.Min(Math.Max(bitmap.Width + 120, 920), workArea.Width - 80);
             Height = Math.Min(Math.Max(bitmap.Height + 180, 560), workArea.Height - 80);
 
+            // Полноценное изменение размера и перетаскивание
             ResizeMode = ResizeMode.CanResizeWithGrip;
             Topmost = true;
             ShowActivated = true;
@@ -2488,7 +2563,17 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 CornerRadius = new CornerRadius(8),
                 Margin = new Thickness(12, 8, 12, 4),
                 Padding = new Thickness(8, 4, 8, 4),
-                HorizontalAlignment = System.Windows.HorizontalAlignment.Center
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+                Cursor = Cursors.SizeAll
+            };
+
+            // Перемещение окна редактора за шапку инструментов
+            topCard.MouseDown += (s, e) =>
+            {
+                if (e.LeftButton == MouseButtonState.Pressed && e.OriginalSource is not Button)
+                {
+                    DragMove();
+                }
             };
 
             _mainToolBar.Orientation = System.Windows.Controls.Orientation.Horizontal;
