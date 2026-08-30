@@ -106,7 +106,7 @@ namespace QScreen
 
     public static class UpdateChecker
     {
-        public const string CurrentVersion = "9.5.0";
+        public const string CurrentVersion = "9.6.0";
         public static string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -509,7 +509,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public static HotkeyBinding HK_Screen = new() { Name = "Screen", Modifiers = Win32.MOD_CONTROL | Win32.MOD_SHIFT, Key = 0x33, DisplayText = "Ctrl + Shift + 3" };
         public static HotkeyBinding HK_Record = new() { Name = "Record", Modifiers = Win32.MOD_CONTROL | Win32.MOD_SHIFT, Key = 0x35, DisplayText = "Ctrl + Shift + 5" };
 
-        public static string DefaultFormat = "png";
+        public static string DefaultFormat = "png"; // png, jpg, pdf, heic, webp
         public static double JpegQuality = 0.85;
         public static string FilenamePrefix = "QScreen";
         public static string DateFormat = "dd.MM.yyyy_HH.mm.ss";
@@ -517,9 +517,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public static bool DirectSave = false;
         public static bool ShowThumbnail = true;
 
+        // Видео параметры
         public static int VideoFps = 60;
-        public static string VideoQuality = "high";
-        public static string VideoFormat = "mp4";
+        public static string VideoQuality = "high"; // high, medium, low
+        public static string VideoFormat = "mp4";   // mp4, gif
+        public static string VideoCodec = "h264";   // h264, h265
         public static bool RecordCursor = true;
         public static bool VideoCountdown = true;
 
@@ -552,6 +554,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                         else if (k == "VideoFps" && int.TryParse(v, out var fps)) VideoFps = fps;
                         else if (k == "VideoQuality") VideoQuality = v;
                         else if (k == "VideoFormat") VideoFormat = v;
+                        else if (k == "VideoCodec") VideoCodec = v;
                         else if (k == "RecordCursor" && bool.TryParse(v, out var rc)) RecordCursor = rc;
                         else if (k == "VideoCountdown" && bool.TryParse(v, out var vc)) VideoCountdown = vc;
                     }
@@ -583,6 +586,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     $"VideoFps={VideoFps}",
                     $"VideoQuality={VideoQuality}",
                     $"VideoFormat={VideoFormat}",
+                    $"VideoCodec={VideoCodec}",
                     $"RecordCursor={RecordCursor}",
                     $"VideoCountdown={VideoCountdown}"
                 };
@@ -883,8 +887,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             _controller = controller;
             Title = "Настройки QScreen";
-            Width = 540;
-            Height = 650;
+            Width = 550;
+            Height = 680;
             MaxHeight = SystemParameters.WorkArea.Height - 30;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = new SolidColorBrush(Color.FromRgb(28, 30, 36));
@@ -919,6 +923,20 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(new TextBlock { Text = "🎥 Настройки записи видео", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 6) });
 
+            var codecPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            codecPanel.Children.Add(new TextBlock { Text = "Видео кодек:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+            var cbCodec = new ComboBox { Width = 220, HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
+            cbCodec.Items.Add("H.264 / AVC (Максимальная совместимость)");
+            cbCodec.Items.Add("H.265 / HEVC (Высокое сжатие / 4K)");
+            cbCodec.SelectedIndex = AppSettings.VideoCodec == "h265" ? 1 : 0;
+            cbCodec.SelectionChanged += (s, e) =>
+            {
+                AppSettings.VideoCodec = cbCodec.SelectedIndex == 1 ? "h265" : "h264";
+                AppSettings.Save();
+            };
+            codecPanel.Children.Add(cbCodec);
+            mainStack.Children.Add(codecPanel);
+
             var fpsPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
             fpsPanel.Children.Add(new TextBlock { Text = "Частота кадров (FPS):", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
             var cbFps = new ComboBox { Width = 220, HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
@@ -937,8 +955,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             var vFmtPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
             vFmtPanel.Children.Add(new TextBlock { Text = "Формат видеозаписи:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
             var cbVFmt = new ComboBox { Width = 220, HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
-            cbVFmt.Items.Add("MP4 (H.264 / Высокое сжатие)");
-            cbVFmt.Items.Add("GIF (Анимация для чатов)");
+            cbVFmt.Items.Add("MP4 (Видео)");
+            cbVFmt.Items.Add("GIF (Анимация)");
             cbVFmt.SelectedIndex = AppSettings.VideoFormat == "gif" ? 1 : 0;
             cbVFmt.SelectionChanged += (s, e) =>
             {
@@ -981,13 +999,15 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             fmtPanel.Children.Add(new TextBlock { Text = "Формат скриншотов:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
             var cbFormat = new ComboBox { Width = 220, HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
             cbFormat.Items.Add("PNG (Без потерь)");
-            cbFormat.Items.Add("JPG (Компактный размер)");
+            cbFormat.Items.Add("JPG (Компактный)");
+            cbFormat.Items.Add("HEIC / HEIF (Высокоэффективный)");
+            cbFormat.Items.Add("WEBP (Веб-формат)");
             cbFormat.Items.Add("PDF (Документ)");
-            cbFormat.SelectedIndex = AppSettings.DefaultFormat switch { "jpg" => 1, "pdf" => 2, _ => 0 };
+            cbFormat.SelectedIndex = AppSettings.DefaultFormat switch { "jpg" => 1, "heic" => 2, "webp" => 3, "pdf" => 4, _ => 0 };
             cbFormat.SelectionChanged += (s, e) =>
             {
-                AppSettings.DefaultFormat = cbFormat.SelectedIndex switch { 1 => "jpg", 2 => "pdf", _ => "png" };
-                _jpgQualityPanel.Visibility = AppSettings.DefaultFormat == "jpg" ? Visibility.Visible : Visibility.Collapsed;
+                AppSettings.DefaultFormat = cbFormat.SelectedIndex switch { 1 => "jpg", 2 => "heic", 3 => "webp", 4 => "pdf", _ => "png" };
+                _jpgQualityPanel.Visibility = (AppSettings.DefaultFormat == "jpg" || AppSettings.DefaultFormat == "webp") ? Visibility.Visible : Visibility.Collapsed;
                 AppSettings.Save();
                 UpdatePreview();
             };
@@ -996,8 +1016,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             _jpgQualityPanel.Orientation = System.Windows.Controls.Orientation.Horizontal;
             _jpgQualityPanel.Margin = new Thickness(0, 0, 0, 6);
-            _jpgQualityPanel.Visibility = AppSettings.DefaultFormat == "jpg" ? Visibility.Visible : Visibility.Collapsed;
-            _jpgQualityPanel.Children.Add(new TextBlock { Text = "Качество JPG:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
+            _jpgQualityPanel.Visibility = (AppSettings.DefaultFormat == "jpg" || AppSettings.DefaultFormat == "webp") ? Visibility.Visible : Visibility.Collapsed;
+            _jpgQualityPanel.Children.Add(new TextBlock { Text = "Качество сжатия:", Width = 160, Foreground = Brushes.LightGray, VerticalAlignment = System.Windows.VerticalAlignment.Center });
             var sliderQ = new Slider { Width = 160, Minimum = 50, Maximum = 100, Value = AppSettings.JpegQuality * 100, VerticalAlignment = System.Windows.VerticalAlignment.Center };
             var lblQ = new TextBlock { Text = $"{(int)sliderQ.Value}%", Width = 50, Margin = new Thickness(10, 0, 0, 0), Foreground = new SolidColorBrush(Color.FromRgb(50, 180, 255)), FontWeight = FontWeights.Bold, VerticalAlignment = System.Windows.VerticalAlignment.Center };
             sliderQ.ValueChanged += (s, e) =>
@@ -1123,7 +1143,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             mainStack.Children.Add(new TextBlock
             {
-                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.5.0)",
+                Text = $"QScreen v{UpdateChecker.CurrentVersion} (Build 9.6.0)",
                 FontSize = 11,
                 Foreground = Brushes.Gray,
                 HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
@@ -1203,6 +1223,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         private double _dpiScaleX = 1.0;
         private double _dpiScaleY = 1.0;
+        private double _vsLeft = 0;
+        private double _vsTop = 0;
 
         private const double HandleSize = 10.0;
 
@@ -1211,6 +1233,10 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             _screenBitmap = screenBitmap;
             _isSmartMode = isSmartMode;
             _isVideoMode = isVideoMode;
+
+            var vs = Forms.SystemInformation.VirtualScreen;
+            _vsLeft = vs.Left;
+            _vsTop = vs.Top;
 
             Left = SystemParameters.VirtualScreenLeft;
             Top = SystemParameters.VirtualScreenTop;
@@ -1237,19 +1263,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
                 if (_isSmartMode)
                 {
-                    var vs = Forms.SystemInformation.VirtualScreen;
-                    _windows = WindowDetector.GetVisibleWindows(_dpiScaleX, _dpiScaleY, vs.Left, vs.Top);
+                    _windows = WindowDetector.GetVisibleWindows(_dpiScaleX, _dpiScaleY, _vsLeft, _vsTop);
                 }
 
                 if (_isVideoMode)
                 {
-                    double w = Math.Min(1280, Width * 0.7);
-                    double h = w * (9.0 / 16.0);
-                    double x = (Width - w) / 2;
-                    double y = (Height - h) / 2;
-                    _selectedRect = new Rect(x, y, w, h);
-                    _hasSelectedZone = true;
-                    InvalidateVisual();
+                    CenterZoneOnActiveMonitor();
                 }
             };
 
@@ -1281,6 +1300,32 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             MouseDown += OnMouseDownHandler;
             MouseMove += OnMouseMoveHandler;
             MouseUp += OnMouseUpHandler;
+        }
+
+        private void CenterZoneOnActiveMonitor()
+        {
+            var cursorPos = Forms.Cursor.Position;
+            var currentScreen = Forms.Screen.FromPoint(cursorPos);
+
+            double monDipLeft = (currentScreen.Bounds.Left - _vsLeft) / _dpiScaleX;
+            double monDipTop = (currentScreen.Bounds.Top - _vsTop) / _dpiScaleY;
+            double monDipWidth = currentScreen.Bounds.Width / _dpiScaleX;
+            double monDipHeight = currentScreen.Bounds.Height / _dpiScaleY;
+
+            double w = Math.Min(1280, monDipWidth * 0.75);
+            double h = w * (9.0 / 16.0);
+            if (h > monDipHeight * 0.8)
+            {
+                h = monDipHeight * 0.8;
+                w = h * (16.0 / 9.0);
+            }
+
+            double x = monDipLeft + (monDipWidth - w) / 2;
+            double y = monDipTop + (monDipHeight - h) / 2;
+
+            _selectedRect = new Rect(x, y, w, h);
+            _hasSelectedZone = true;
+            InvalidateVisual();
         }
 
         private HandleType HitTestHandle(Point pt)
@@ -1326,7 +1371,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
         private Rect GetToolbarRect()
         {
-            double tbW = 420;
+            double tbW = 460;
             double tbH = 44;
             double tbX = _selectedRect.Left + (_selectedRect.Width - tbW) / 2;
             double tbY = _selectedRect.Bottom + 12;
@@ -1335,6 +1380,9 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             {
                 tbY = _selectedRect.Top - tbH - 12;
             }
+            if (tbX < 10) tbX = 10;
+            if (tbX + tbW > ActualWidth - 10) tbX = ActualWidth - tbW - 10;
+
             return new Rect(tbX, tbY, tbW, tbH);
         }
 
@@ -1374,7 +1422,9 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             _startPoint = pt;
             _currentPoint = pt;
-            _isDragging = false;
+            _isDragging = true;
+            _activeHandle = HandleType.None;
+            _hasSelectedZone = false;
             InvalidateVisual();
         }
 
@@ -1400,16 +1450,13 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 }
                 else
                 {
-                    if (Math.Abs(_currentPoint.X - _startPoint.X) > 5 || Math.Abs(_currentPoint.Y - _startPoint.Y) > 5)
-                    {
-                        double x = Math.Min(_startPoint.X, _currentPoint.X);
-                        double y = Math.Min(_startPoint.Y, _currentPoint.Y);
-                        double w = Math.Abs(_startPoint.X - _currentPoint.X);
-                        double h = Math.Abs(_startPoint.Y - _currentPoint.Y);
-                        _selectedRect = new Rect(x, y, w, h);
-                        _hasSelectedZone = true;
-                        _hoveredWindow = null;
-                    }
+                    double x = Math.Min(_startPoint.X, _currentPoint.X);
+                    double y = Math.Min(_startPoint.Y, _currentPoint.Y);
+                    double w = Math.Abs(_startPoint.X - _currentPoint.X);
+                    double h = Math.Abs(_startPoint.Y - _currentPoint.Y);
+                    _selectedRect = new Rect(x, y, w, h);
+                    _hasSelectedZone = true;
+                    _hoveredWindow = null;
                 }
             }
             else
@@ -1537,28 +1584,32 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             double relX = pt.X - tb.Left;
 
-            if (relX >= 8 && relX <= 135)
+            if (relX >= 6 && relX <= 130)
             {
                 StartActualVideoRecording();
             }
-            else if (relX >= 140 && relX <= 245)
+            else if (relX >= 135 && relX <= 235)
             {
                 _isAddingBlur = true;
                 InvalidateVisual();
             }
-            else if (relX >= 250 && relX <= 315)
+            else if (relX >= 240 && relX <= 300)
             {
-                double nw = Math.Min(1280, Width * 0.8);
+                double nw = Math.Min(1280, _selectedRect.Width > 200 ? _selectedRect.Width : 1280);
                 double nh = nw * (9.0 / 16.0);
-                _selectedRect = new Rect((Width - nw) / 2, (Height - nh) / 2, nw, nh);
+                _selectedRect = new Rect(_selectedRect.Left, _selectedRect.Top, nw, nh);
                 InvalidateVisual();
             }
-            else if (relX >= 320 && relX <= 375)
+            else if (relX >= 305 && relX <= 365)
+            {
+                CenterZoneOnActiveMonitor();
+            }
+            else if (relX >= 370 && relX <= 420)
             {
                 _selectedRect = new Rect(0, 0, ActualWidth, ActualHeight);
                 InvalidateVisual();
             }
-            else if (relX >= 380 && relX <= 415)
+            else if (relX >= 425 && relX <= 455)
             {
                 ReleaseMouseCapture();
                 Close();
@@ -1668,31 +1719,36 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(30, 32, 38)), new Pen(new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)), 1), tb, 8, 8);
 
-            var btnRec = new Rect(tb.Left + 6, tb.Top + 6, 125, 32);
+            var btnRec = new Rect(tb.Left + 6, tb.Top + 6, 120, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(239, 68, 68)), null, btnRec, 6, 6);
             var ftRec = new FormattedText("🔴 Начать запись", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI Semibold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-            dc.DrawText(ftRec, new Point(btnRec.Left + 12, btnRec.Top + 8));
+            dc.DrawText(ftRec, new Point(btnRec.Left + 10, btnRec.Top + 8));
 
-            var btnBlur = new Rect(tb.Left + 138, tb.Top + 6, 105, 32);
+            var btnBlur = new Rect(tb.Left + 132, tb.Top + 6, 100, 32);
             var blurBrush = _isAddingBlur ? new SolidColorBrush(Color.FromRgb(255, 80, 80)) : new SolidColorBrush(Color.FromRgb(48, 52, 62));
             dc.DrawRoundedRectangle(blurBrush, null, btnBlur, 6, 6);
-            var ftB = new FormattedText(_isAddingBlur ? "Выделите..." : "░ + Блер зоны", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            var ftB = new FormattedText(_isAddingBlur ? "Выделите..." : "░ + Блер", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             dc.DrawText(ftB, new Point(btnBlur.Left + 12, btnBlur.Top + 8));
 
-            var btn169 = new Rect(tb.Left + 250, tb.Top + 6, 65, 32);
+            var btn169 = new Rect(tb.Left + 238, tb.Top + 6, 60, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btn169, 6, 6);
             var ft169 = new FormattedText("16 : 9", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-            dc.DrawText(ft169, new Point(btn169.Left + 16, btn169.Top + 8));
+            dc.DrawText(ft169, new Point(btn169.Left + 14, btn169.Top + 8));
 
-            var btnFull = new Rect(tb.Left + 322, tb.Top + 6, 52, 32);
+            var btnMon = new Rect(tb.Left + 304, tb.Top + 6, 60, 32);
+            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btnMon, 6, 6);
+            var ftMon = new FormattedText("Монитор", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            dc.DrawText(ftMon, new Point(btnMon.Left + 6, btnMon.Top + 9));
+
+            var btnFull = new Rect(tb.Left + 370, tb.Top + 6, 50, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btnFull, 6, 6);
-            var ftFull = new FormattedText("Экран", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-            dc.DrawText(ftFull, new Point(btnFull.Left + 10, btnFull.Top + 9));
+            var ftFull = new FormattedText("Все", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            dc.DrawText(ftFull, new Point(btnFull.Left + 12, btnFull.Top + 9));
 
-            var btnClose = new Rect(tb.Left + 380, tb.Top + 6, 32, 32);
+            var btnClose = new Rect(tb.Left + 426, tb.Top + 6, 28, 32);
             dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(60, 64, 75)), null, btnClose, 6, 6);
             var ftClose = new FormattedText("✕", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI Bold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-            dc.DrawText(ftClose, new Point(btnClose.Left + 10, btnClose.Top + 8));
+            dc.DrawText(ftClose, new Point(btnClose.Left + 8, btnClose.Top + 8));
         }
 
         private void DrawReticle(DrawingContext dc, Point pt)
@@ -1816,9 +1872,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             if (useFfmpeg)
             {
                 string crf = AppSettings.VideoQuality switch { "medium" => "23", "low" => "28", _ => "18" };
+                string codecArg = AppSettings.VideoCodec == "h265" ? "libx265" : "libx264";
+
                 string args = AppSettings.VideoFormat == "gif"
                     ? $"-y -f rawvideo -vcodec rawvideo -s {width}x{height} -pix_fmt bgr24 -r {fps} -i - -vf \"fps={Math.Min(fps, 30)},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" \"{_outputPath}\""
-                    : $"-y -f rawvideo -vcodec rawvideo -s {width}x{height} -pix_fmt bgr24 -r {fps} -i - -c:v libx264 -preset ultrafast -crf {crf} -pix_fmt yuv420p \"{_outputPath}\"";
+                    : $"-y -f rawvideo -vcodec rawvideo -s {width}x{height} -pix_fmt bgr24 -r {fps} -i - -c:v {codecArg} -preset ultrafast -crf {crf} -pix_fmt yuv420p \"{_outputPath}\"";
 
                 var psi = new ProcessStartInfo
                 {
@@ -1977,6 +2035,9 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         private TextBlock _timerText = new();
         private DispatcherTimer _tickTimer = new();
         private Button _btnPause = new();
+        private Border _bar = new();
+        private Point _barOffset;
+        private bool _isBarDragging = false;
 
         public RecordingOverlayWindow(Rect zoneRect, VideoRecorder recorder)
         {
@@ -2020,14 +2081,39 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Canvas.SetTop(frame, _zoneRect.Top - 2);
             canvas.Children.Add(frame);
 
-            var bar = new Border
+            _bar = new Border
             {
                 Background = new SolidColorBrush(Color.FromRgb(24, 26, 32)),
                 BorderBrush = new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(10),
                 Padding = new Thickness(12, 6, 12, 6),
+                Cursor = Cursors.SizeAll,
                 Effect = new DropShadowEffect { BlurRadius = 16, ShadowDepth = 4, Opacity = 0.5 }
+            };
+
+            _bar.MouseDown += (s, e) =>
+            {
+                if (e.LeftButton == MouseButtonState.Pressed)
+                {
+                    _isBarDragging = true;
+                    _barOffset = e.GetPosition(_bar);
+                    _bar.CaptureMouse();
+                }
+            };
+            _bar.MouseMove += (s, e) =>
+            {
+                if (_isBarDragging)
+                {
+                    var pt = e.GetPosition(canvas);
+                    Canvas.SetLeft(_bar, pt.X - _barOffset.X);
+                    Canvas.SetTop(_bar, pt.Y - _barOffset.Y);
+                }
+            };
+            _bar.MouseUp += (s, e) =>
+            {
+                _isBarDragging = false;
+                _bar.ReleaseMouseCapture();
             };
 
             var stack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
@@ -2088,15 +2174,15 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             btnCancel.Click += (s, e) => _recorder.Cancel();
             stack.Children.Add(btnCancel);
 
-            bar.Child = stack;
+            _bar.Child = stack;
 
             double barX = _zoneRect.Left + (_zoneRect.Width - 280) / 2;
             double barY = _zoneRect.Bottom + 12;
             if (barY + 50 > ActualHeight) barY = _zoneRect.Top - 50;
 
-            Canvas.SetLeft(bar, barX);
-            Canvas.SetTop(bar, barY);
-            canvas.Children.Add(bar);
+            Canvas.SetLeft(_bar, barX);
+            Canvas.SetTop(_bar, barY);
+            canvas.Children.Add(_bar);
 
             Content = canvas;
         }
@@ -2249,6 +2335,8 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Width = Math.Min(Math.Max(bitmap.Width + 120, 920), workArea.Width - 80);
             Height = Math.Min(Math.Max(bitmap.Height + 180, 560), workArea.Height - 80);
 
+            // Редактор изменяет размер и перемещается
+            ResizeMode = ResizeMode.CanResizeWithGrip;
             Topmost = true;
             ShowActivated = true;
 
@@ -2545,7 +2633,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             var btn = CreateActionButton(_exportFormat.ToUpper(), () => { }, "Выбрать формат файла");
             var menu = new ContextMenu();
-            foreach (var fmt in new[] { "png", "jpg", "pdf" })
+            foreach (var fmt in new[] { "png", "jpg", "heic", "webp", "pdf" })
             {
                 var item = new MenuItem { Header = fmt.ToUpper() };
                 item.Click += (s, e) => { _exportFormat = fmt; btn.Content = fmt.ToUpper(); };
@@ -2861,7 +2949,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             using (var g = Graphics.FromImage(result))
             {
                 g.InterpolationMode = InterpolationMode.NearestNeighbor;
-                g.DrawImage(small, 0, 0, result.Width, result.Height);
+                g.DrawImage(small, new System.Drawing.Rectangle(rx, ry, rw, rh), 0, 0, sw, sh, GraphicsUnit.Pixel);
             }
             return result;
         }
@@ -2938,7 +3026,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             {
                 var sfd = new Microsoft.Win32.SaveFileDialog
                 {
-                    Filter = "PNG Image|*.png|JPEG Image|*.jpg",
+                    Filter = "PNG Image|*.png|JPEG Image|*.jpg|HEIC Image|*.heic|WEBP Image|*.webp|PDF Document|*.pdf",
                     FileName = fileName,
                     InitialDirectory = AppSettings.SaveFolder
                 };
@@ -2954,7 +3042,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             try
             {
-                MessageBox.Show("Распознавание текста (OCR) готово к использованию.", "QScreen OCR", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show("Распознавание текста (OCR) активно для скриншота.", "QScreen OCR", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
