@@ -523,6 +523,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         public static string VideoFormat = "mp4";   // mp4, gif
         public static string VideoCodec = "h264";   // h264, h265
         public static bool RecordCursor = true;
+        public static bool RecordAudio = false;
         public static bool VideoCountdown = true;
 
         static AppSettings() { Load(); }
@@ -556,6 +557,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                         else if (k == "VideoFormat") VideoFormat = v;
                         else if (k == "VideoCodec") VideoCodec = v;
                         else if (k == "RecordCursor" && bool.TryParse(v, out var rc)) RecordCursor = rc;
+                        else if (k == "RecordAudio" && bool.TryParse(v, out var ra)) RecordAudio = ra;
                         else if (k == "VideoCountdown" && bool.TryParse(v, out var vc)) VideoCountdown = vc;
                     }
                 }
@@ -588,6 +590,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     $"VideoFormat={VideoFormat}",
                     $"VideoCodec={VideoCodec}",
                     $"RecordCursor={RecordCursor}",
+                    $"RecordAudio={RecordAudio}",
                     $"VideoCountdown={VideoCountdown}"
                 };
                 System.IO.File.WriteAllLines(ConfigPath, lines);
@@ -986,6 +989,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             chkCursor.Unchecked += (s, e) => { AppSettings.RecordCursor = false; AppSettings.Save(); };
             mainStack.Children.Add(chkCursor);
 
+            var chkAudio = new CheckBox { Content = "🎙 Записывать звук с микрофона", IsChecked = AppSettings.RecordAudio, Foreground = Brushes.White, Margin = new Thickness(0, 2, 0, 4) };
+            chkAudio.Checked += (s, e) => { AppSettings.RecordAudio = true; AppSettings.Save(); };
+            chkAudio.Unchecked += (s, e) => { AppSettings.RecordAudio = false; AppSettings.Save(); };
+            mainStack.Children.Add(chkAudio);
+
             var chkCount = new CheckBox { Content = "Таймер обратного отсчета (3 сек) перед стартом", IsChecked = AppSettings.VideoCountdown, Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 6) };
             chkCount.Checked += (s, e) => { AppSettings.VideoCountdown = true; AppSettings.Save(); };
             chkCount.Unchecked += (s, e) => { AppSettings.VideoCountdown = false; AppSettings.Save(); };
@@ -1226,7 +1234,12 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         private double _vsLeft = 0;
         private double _vsTop = 0;
 
-        private const double HandleSize = 10.0;
+        private Canvas _rootCanvas = new();
+        private Border _videoToolbar = new();
+        private Button _btnMic = new();
+        private Button _btnBlurToggle = new();
+
+        private const double HandleSize = 12.0;
 
         public QScreenOverlayWindow(Bitmap screenBitmap, bool isSmartMode = false, bool isVideoMode = false)
         {
@@ -1250,6 +1263,9 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             Focusable = true;
             ShowActivated = true;
 
+            _rootCanvas.Background = Brushes.Transparent;
+            Content = _rootCanvas;
+
             Loaded += (s, e) =>
             {
                 Activate();
@@ -1268,6 +1284,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
                 if (_isVideoMode)
                 {
+                    BuildVideoToolbar();
                     CenterZoneOnActiveMonitor();
                 }
             };
@@ -1290,6 +1307,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 if (_isAddingBlur)
                 {
                     _isAddingBlur = false;
+                    UpdateBlurButtonState();
                     InvalidateVisual();
                     return;
                 }
@@ -1300,6 +1318,185 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             MouseDown += OnMouseDownHandler;
             MouseMove += OnMouseMoveHandler;
             MouseUp += OnMouseUpHandler;
+        }
+
+        private void BuildVideoToolbar()
+        {
+            _videoToolbar = new Border
+            {
+                Background = new SolidColorBrush(Color.FromRgb(28, 30, 36)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(8, 6, 8, 6),
+                Effect = new DropShadowEffect { BlurRadius = 18, ShadowDepth = 5, Opacity = 0.65 }
+            };
+
+            var stack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+
+            var btnRec = new Button
+            {
+                Content = "🔴 Начать запись",
+                Background = new SolidColorBrush(Color.FromRgb(239, 68, 68)),
+                Foreground = Brushes.White,
+                FontWeight = FontWeights.Bold,
+                FontSize = 12,
+                Padding = new Thickness(12, 6, 12, 6),
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand
+            };
+            btnRec.Click += (s, e) => StartActualVideoRecording();
+            stack.Children.Add(btnRec);
+
+            _btnBlurToggle = new Button
+            {
+                Content = "░ + Блер зоны",
+                ToolTip = "Выделите конфиденциальные зоны на экране для размытия",
+                Background = new SolidColorBrush(Color.FromRgb(48, 52, 62)),
+                Foreground = Brushes.White,
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 11,
+                Padding = new Thickness(10, 6, 10, 6),
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand
+            };
+            _btnBlurToggle.Click += (s, e) =>
+            {
+                _isAddingBlur = !_isAddingBlur;
+                UpdateBlurButtonState();
+                InvalidateVisual();
+            };
+            stack.Children.Add(_btnBlurToggle);
+
+            _btnMic = new Button
+            {
+                Content = AppSettings.RecordAudio ? "🎙 Микрофон: ВКЛ" : "🔇 Микрофон: ВЫКЛ",
+                ToolTip = "Включить / выключить запись звука с микрофона",
+                Background = AppSettings.RecordAudio ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(48, 52, 62)),
+                Foreground = Brushes.White,
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 11,
+                Padding = new Thickness(10, 6, 10, 6),
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand
+            };
+            _btnMic.Click += (s, e) =>
+            {
+                AppSettings.RecordAudio = !AppSettings.RecordAudio;
+                AppSettings.Save();
+                _btnMic.Content = AppSettings.RecordAudio ? "🎙 Микрофон: ВКЛ" : "🔇 Микрофон: ВЫКЛ";
+                _btnMic.Background = AppSettings.RecordAudio ? new SolidColorBrush(Color.FromRgb(16, 185, 129)) : new SolidColorBrush(Color.FromRgb(48, 52, 62));
+            };
+            stack.Children.Add(_btnMic);
+
+            var btn169 = new Button
+            {
+                Content = "📐 16:9",
+                Background = new SolidColorBrush(Color.FromRgb(48, 52, 62)),
+                Foreground = Brushes.White,
+                FontSize = 11,
+                Padding = new Thickness(8, 6, 8, 6),
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand
+            };
+            btn169.Click += (s, e) =>
+            {
+                double nw = Math.Min(1280, _selectedRect.Width > 200 ? _selectedRect.Width : 1280);
+                double nh = nw * (9.0 / 16.0);
+                _selectedRect = new Rect(_selectedRect.Left, _selectedRect.Top, nw, nh);
+                UpdateToolbarPosition();
+                InvalidateVisual();
+            };
+            stack.Children.Add(btn169);
+
+            var btnMon = new Button
+            {
+                Content = "🖥 Монитор",
+                Background = new SolidColorBrush(Color.FromRgb(48, 52, 62)),
+                Foreground = Brushes.White,
+                FontSize = 11,
+                Padding = new Thickness(8, 6, 8, 6),
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand
+            };
+            btnMon.Click += (s, e) => CenterZoneOnActiveMonitor();
+            stack.Children.Add(btnMon);
+
+            var btnFull = new Button
+            {
+                Content = "🔲 Все",
+                Background = new SolidColorBrush(Color.FromRgb(48, 52, 62)),
+                Foreground = Brushes.White,
+                FontSize = 11,
+                Padding = new Thickness(8, 6, 8, 6),
+                BorderThickness = new Thickness(0),
+                Margin = new Thickness(0, 0, 6, 0),
+                Cursor = Cursors.Hand
+            };
+            btnFull.Click += (s, e) =>
+            {
+                _selectedRect = new Rect(0, 0, ActualWidth, ActualHeight);
+                UpdateToolbarPosition();
+                InvalidateVisual();
+            };
+            stack.Children.Add(btnFull);
+
+            var btnClose = new Button
+            {
+                Content = "✕",
+                Background = new SolidColorBrush(Color.FromRgb(60, 64, 75)),
+                Foreground = Brushes.White,
+                FontWeight = FontWeights.Bold,
+                FontSize = 12,
+                Padding = new Thickness(10, 6, 10, 6),
+                BorderThickness = new Thickness(0),
+                Cursor = Cursors.Hand
+            };
+            btnClose.Click += (s, e) =>
+            {
+                ReleaseMouseCapture();
+                Close();
+            };
+            stack.Children.Add(btnClose);
+
+            _videoToolbar.Child = stack;
+            _rootCanvas.Children.Add(_videoToolbar);
+        }
+
+        private void UpdateBlurButtonState()
+        {
+            if (_btnBlurToggle != null)
+            {
+                _btnBlurToggle.Content = _isAddingBlur ? "🔴 Выделите зону" : "░ + Блер зоны";
+                _btnBlurToggle.Background = _isAddingBlur ? new SolidColorBrush(Color.FromRgb(255, 60, 80)) : new SolidColorBrush(Color.FromRgb(48, 52, 62));
+            }
+        }
+
+        private void UpdateToolbarPosition()
+        {
+            if (!_isVideoMode || _videoToolbar == null) return;
+
+            _videoToolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double tbW = _videoToolbar.DesiredSize.Width > 0 ? _videoToolbar.DesiredSize.Width : 480;
+            double tbH = _videoToolbar.DesiredSize.Height > 0 ? _videoToolbar.DesiredSize.Height : 44;
+
+            double tbX = _selectedRect.Left + (_selectedRect.Width - tbW) / 2;
+            double tbY = _selectedRect.Bottom + 12;
+
+            if (tbY + tbH > ActualHeight - 10)
+            {
+                tbY = _selectedRect.Top - tbH - 12;
+            }
+            if (tbX < 10) tbX = 10;
+            if (tbX + tbW > ActualWidth - 10) tbX = ActualWidth - tbW - 10;
+
+            Canvas.SetLeft(_videoToolbar, tbX);
+            Canvas.SetTop(_videoToolbar, tbY);
         }
 
         private void CenterZoneOnActiveMonitor()
@@ -1325,6 +1522,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
 
             _selectedRect = new Rect(x, y, w, h);
             _hasSelectedZone = true;
+            UpdateToolbarPosition();
             InvalidateVisual();
         }
 
@@ -1345,12 +1543,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             if (new Rect(r.Left - hs, r.Top + r.Height / 2 - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.Left;
             if (new Rect(r.Right - hs, r.Top + r.Height / 2 - hs, hs * 2, hs * 2).Contains(pt)) return HandleType.Right;
 
-            if (_isVideoMode)
-            {
-                var tbRect = GetToolbarRect();
-                if (tbRect.Contains(pt)) return HandleType.None;
-            }
-
             if (r.Contains(pt)) return HandleType.Move;
 
             return HandleType.None;
@@ -1369,37 +1561,18 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             };
         }
 
-        private Rect GetToolbarRect()
-        {
-            double tbW = 460;
-            double tbH = 44;
-            double tbX = _selectedRect.Left + (_selectedRect.Width - tbW) / 2;
-            double tbY = _selectedRect.Bottom + 12;
-
-            if (tbY + tbH > ActualHeight - 10)
-            {
-                tbY = _selectedRect.Top - tbH - 12;
-            }
-            if (tbX < 10) tbX = 10;
-            if (tbX + tbW > ActualWidth - 10) tbX = ActualWidth - tbW - 10;
-
-            return new Rect(tbX, tbY, tbW, tbH);
-        }
-
         private void OnMouseDownHandler(object sender, MouseButtonEventArgs e)
         {
             if (e.LeftButton != MouseButtonState.Pressed) return;
 
             var pt = e.GetPosition(this);
 
-            if (_isVideoMode)
+            if (_isVideoMode && _videoToolbar != null)
             {
-                var tbRect = GetToolbarRect();
-                if (tbRect.Contains(pt))
-                {
-                    HandleToolbarClick(pt, tbRect);
-                    return;
-                }
+                var tbLeft = Canvas.GetLeft(_videoToolbar);
+                var tbTop = Canvas.GetTop(_videoToolbar);
+                var tbBounds = new Rect(tbLeft, tbTop, _videoToolbar.ActualWidth, _videoToolbar.ActualHeight);
+                if (tbBounds.Contains(pt)) return;
             }
 
             if (_isAddingBlur)
@@ -1447,6 +1620,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     double dx = _currentPoint.X - _handleDragStart.X;
                     double dy = _currentPoint.Y - _handleDragStart.Y;
                     _selectedRect = CalculateNewRect(_initialDragRect, _activeHandle, dx, dy);
+                    UpdateToolbarPosition();
                 }
                 else
                 {
@@ -1457,6 +1631,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     _selectedRect = new Rect(x, y, w, h);
                     _hasSelectedZone = true;
                     _hoveredWindow = null;
+                    UpdateToolbarPosition();
                 }
             }
             else
@@ -1491,6 +1666,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 _isAddingBlur = false;
                 _isDragging = false;
                 _tempBlurRect = Rect.Empty;
+                UpdateBlurButtonState();
                 InvalidateVisual();
                 return;
             }
@@ -1580,42 +1756,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             return new Rect(x, y, w, h);
         }
 
-        private void HandleToolbarClick(Point pt, Rect tb)
-        {
-            double relX = pt.X - tb.Left;
-
-            if (relX >= 6 && relX <= 130)
-            {
-                StartActualVideoRecording();
-            }
-            else if (relX >= 135 && relX <= 235)
-            {
-                _isAddingBlur = true;
-                InvalidateVisual();
-            }
-            else if (relX >= 240 && relX <= 300)
-            {
-                double nw = Math.Min(1280, _selectedRect.Width > 200 ? _selectedRect.Width : 1280);
-                double nh = nw * (9.0 / 16.0);
-                _selectedRect = new Rect(_selectedRect.Left, _selectedRect.Top, nw, nh);
-                InvalidateVisual();
-            }
-            else if (relX >= 305 && relX <= 365)
-            {
-                CenterZoneOnActiveMonitor();
-            }
-            else if (relX >= 370 && relX <= 420)
-            {
-                _selectedRect = new Rect(0, 0, ActualWidth, ActualHeight);
-                InvalidateVisual();
-            }
-            else if (relX >= 425 && relX <= 455)
-            {
-                ReleaseMouseCapture();
-                Close();
-            }
-        }
-
         private void StartActualVideoRecording()
         {
             ReleaseMouseCapture();
@@ -1696,11 +1836,6 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 var bRect = new Rect(r.Left + 8, r.Top - 24 > 5 ? r.Top - 24 : r.Top + 8, ftSize.Width + 12, 20);
                 dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(220, 20, 22, 28)), null, bRect, 4, 4);
                 dc.DrawText(ftSize, new Point(bRect.Left + 6, bRect.Top + 2));
-
-                if (_isVideoMode)
-                {
-                    DrawVideoToolbar(dc, GetToolbarRect());
-                }
             }
             else
             {
@@ -1712,43 +1847,7 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
         {
             double hs = HandleSize;
             var handleRect = new Rect(cx - hs / 2, cy - hs / 2, hs, hs);
-            dc.DrawRectangle(Brushes.White, new Pen(new SolidColorBrush(Color.FromRgb(36, 120, 220)), 1.5), handleRect);
-        }
-
-        private void DrawVideoToolbar(DrawingContext dc, Rect tb)
-        {
-            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(30, 32, 38)), new Pen(new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)), 1), tb, 8, 8);
-
-            var btnRec = new Rect(tb.Left + 6, tb.Top + 6, 120, 32);
-            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(239, 68, 68)), null, btnRec, 6, 6);
-            var ftRec = new FormattedText("🔴 Начать запись", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI Semibold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-            dc.DrawText(ftRec, new Point(btnRec.Left + 10, btnRec.Top + 8));
-
-            var btnBlur = new Rect(tb.Left + 132, tb.Top + 6, 100, 32);
-            var blurBrush = _isAddingBlur ? new SolidColorBrush(Color.FromRgb(255, 80, 80)) : new SolidColorBrush(Color.FromRgb(48, 52, 62));
-            dc.DrawRoundedRectangle(blurBrush, null, btnBlur, 6, 6);
-            var ftB = new FormattedText(_isAddingBlur ? "Выделите..." : "░ + Блер", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-            dc.DrawText(ftB, new Point(btnBlur.Left + 12, btnBlur.Top + 8));
-
-            var btn169 = new Rect(tb.Left + 238, tb.Top + 6, 60, 32);
-            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btn169, 6, 6);
-            var ft169 = new FormattedText("16 : 9", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-            dc.DrawText(ft169, new Point(btn169.Left + 14, btn169.Top + 8));
-
-            var btnMon = new Rect(tb.Left + 304, tb.Top + 6, 60, 32);
-            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btnMon, 6, 6);
-            var ftMon = new FormattedText("Монитор", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-            dc.DrawText(ftMon, new Point(btnMon.Left + 6, btnMon.Top + 9));
-
-            var btnFull = new Rect(tb.Left + 370, tb.Top + 6, 50, 32);
-            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(48, 52, 62)), null, btnFull, 6, 6);
-            var ftFull = new FormattedText("Все", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI"), 10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-            dc.DrawText(ftFull, new Point(btnFull.Left + 12, btnFull.Top + 9));
-
-            var btnClose = new Rect(tb.Left + 426, tb.Top + 6, 28, 32);
-            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(60, 64, 75)), null, btnClose, 6, 6);
-            var ftClose = new FormattedText("✕", System.Globalization.CultureInfo.InvariantCulture, System.Windows.FlowDirection.LeftToRight, new Typeface("Segoe UI Bold"), 11, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-            dc.DrawText(ftClose, new Point(btnClose.Left + 8, btnClose.Top + 8));
+            dc.DrawRectangle(Brushes.White, new Pen(new SolidColorBrush(Color.FromRgb(36, 120, 220)), 2), handleRect);
         }
 
         private void DrawReticle(DrawingContext dc, Point pt)
@@ -1874,9 +1973,11 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                 string crf = AppSettings.VideoQuality switch { "medium" => "23", "low" => "28", _ => "18" };
                 string codecArg = AppSettings.VideoCodec == "h265" ? "libx265" : "libx264";
 
+                string audioArgs = AppSettings.RecordAudio ? "-f dshow -i audio=\"default\" " : "";
+
                 string args = AppSettings.VideoFormat == "gif"
                     ? $"-y -f rawvideo -vcodec rawvideo -s {width}x{height} -pix_fmt bgr24 -r {fps} -i - -vf \"fps={Math.Min(fps, 30)},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" \"{_outputPath}\""
-                    : $"-y -f rawvideo -vcodec rawvideo -s {width}x{height} -pix_fmt bgr24 -r {fps} -i - -c:v {codecArg} -preset ultrafast -crf {crf} -pix_fmt yuv420p \"{_outputPath}\"";
+                    : $"-y -f rawvideo -vcodec rawvideo -s {width}x{height} -pix_fmt bgr24 -r {fps} -i - {audioArgs}-c:v {codecArg} -preset ultrafast -crf {crf} -pix_fmt yuv420p \"{_outputPath}\"";
 
                 var psi = new ProcessStartInfo
                 {
@@ -1886,8 +1987,18 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
                     RedirectStandardInput = true,
                     CreateNoWindow = true
                 };
-                _ffmpegProcess = Process.Start(psi);
-                _ffmpegInput = _ffmpegProcess?.StandardInput.BaseStream;
+                try
+                {
+                    _ffmpegProcess = Process.Start(psi);
+                    _ffmpegInput = _ffmpegProcess?.StandardInput.BaseStream;
+                }
+                catch
+                {
+                    string fallbackArgs = $"-y -f rawvideo -vcodec rawvideo -s {width}x{height} -pix_fmt bgr24 -r {fps} -i - -c:v {codecArg} -preset ultrafast -crf {crf} -pix_fmt yuv420p \"{_outputPath}\"";
+                    psi.Arguments = fallbackArgs;
+                    _ffmpegProcess = Process.Start(psi);
+                    _ffmpegInput = _ffmpegProcess?.StandardInput.BaseStream;
+                }
             }
 
             Task.Run(() => CaptureWorker(fps, useFfmpeg, _cts.Token));
@@ -2943,14 +3054,14 @@ Remove-Item -Path '{tempDir}' -Recurse -Force
             var small = new Bitmap(sw, sh);
             using (var g = Graphics.FromImage(small))
             {
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
                 g.DrawImage(cropped, 0, 0, sw, sh);
             }
 
             var result = new Bitmap(rw, rh);
             using (var g = Graphics.FromImage(result))
             {
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
                 g.DrawImage(small, new System.Drawing.Rectangle(0, 0, rw, rh), 0, 0, sw, sh, GraphicsUnit.Pixel);
             }
             return result;
