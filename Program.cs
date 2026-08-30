@@ -77,6 +77,11 @@ namespace QScreen
             }
             catch { }
 
+            if (_cachedIcon == null && System.IO.File.Exists("icon.ico"))
+            {
+                try { _cachedIcon = new Icon("icon.ico"); } catch { }
+            }
+
             if (_cachedIcon == null && System.IO.File.Exists("QScreen.ico"))
             {
                 try { _cachedIcon = new Icon("QScreen.ico"); } catch { }
@@ -197,7 +202,7 @@ namespace QScreen
             progressWin.Icon = AppIconProvider.GetImageSource();
 
             var panel = new StackPanel { Margin = new Thickness(16) };
-            var lbl = new TextBlock { Text = $"Загрузка QScreen v{newVer}...", Foreground = Brushes.White, Margin = new Thickness(0, 0, 0, 10), FontWeight = FontWeights.SemiBold };
+            var lbl = new TextBlock { Text = $"Загрузка QScreen v{newVer}...", Foreground = Brushes.White, Margin = new Thickness(0, 0, 10), FontWeight = FontWeights.SemiBold };
             var pb = new ProgressBar { Height = 14, IsIndeterminate = true, Background = new SolidColorBrush(Color.FromRgb(40, 44, 52)), Foreground = new SolidColorBrush(Color.FromRgb(50, 180, 255)) };
             panel.Children.Add(lbl);
             panel.Children.Add(pb);
