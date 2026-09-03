@@ -1,0 +1,14 @@
+# .NET
+windows/bin/
+windows/obj/
+*.user
+*.suo
+# Swift
+macos/.build/
+macos/.swiftpm/
+macos/QScreen.app/
+# артефакты
+release/
+*.zip
+.DS_Store
+Thumbs.db
