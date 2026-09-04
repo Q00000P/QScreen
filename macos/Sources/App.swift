@@ -50,7 +50,18 @@ public enum UpdateChecker {
                         }
                     }
                 }
-                let htmlUrl = json["html_url"] as? String
+                // Тег новее, но mac-ассета нет — релиз не для этой платформы, не дёргаем
+                guard let zipUrl = zipUrl else {
+                    if isUserInitiated {
+                        DispatchQueue.main.async {
+                            let alert = NSAlert()
+                            alert.messageText = "Обновлений нет"
+                            alert.informativeText = "Релиз v\(remoteVer) не содержит сборку для macOS.\nТекущая версия: v\(currentVersion)."
+                            alert.runModal()
+                        }
+                    }
+                    return
+                }
 
                 DispatchQueue.main.async {
                     let alert = NSAlert()
@@ -58,11 +69,7 @@ public enum UpdateChecker {
                     alert.informativeText = "Доступна новая версия QScreen v\(remoteVer)!\nТекущая: v\(currentVersion)\n\nСкачать и установить обновление автоматически?"
                     alert.addButton(withTitle: "Обновить")
                     alert.addButton(withTitle: "Отмена")
-
-                    if alert.runModal() == .alertFirstButtonReturn {
-                        if let zipUrl = zipUrl { performSilentUpdate(zipUrl: zipUrl) }
-                        else if let h = htmlUrl, let u = URL(string: h) { NSWorkspace.shared.open(u) }
-                    }
+                    if alert.runModal() == .alertFirstButtonReturn { performSilentUpdate(zipUrl: zipUrl) }
                 }
             } else if isUserInitiated {
                 DispatchQueue.main.async {
@@ -1062,6 +1069,14 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable, AVC
     @MainActor
     func arm(initialAppKitRect: CGRect) {
         guard !isRecording, !isArmed else { return }
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()
+            let alert = NSAlert()
+            alert.messageText = "Нужно разрешение на запись экрана"
+            alert.informativeText = "Системные настройки → Конфиденциальность и безопасность → Запись экрана и системного звука → включить QScreen, затем перезапустить приложение."
+            alert.runModal()
+            return
+        }
         AppDelegate.shared?.closeEditor()
         AppDelegate.shared?.closeSettings()
 
@@ -1083,14 +1098,19 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable, AVC
             do {
                 try await startCapturePipeline(appKitRect: rect)
             } catch {
+                await abortPipeline()
                 await MainActor.run {
                     self.teardownUI()
                     self.isArmed = false
+                    self.isRecording = false
+                    self.onStateChange?(.idle)
                     let alert = NSAlert()
                     alert.messageText = "Не удалось запустить запись"
-                    alert.informativeText = "\(error)"
+                    let ns = error as NSError
+                    alert.informativeText = ns.domain.contains("ScreenCaptureKit") && ns.code == -3801
+                        ? "Нет разрешения на запись экрана.\nСистемные настройки → Конфиденциальность и безопасность → Запись экрана и системного звука → включить QScreen, затем перезапустить приложение."
+                        : "\(error)"
                     alert.runModal()
-                    self.onStateChange?(.idle)
                 }
             }
         }
@@ -1158,20 +1178,14 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable, AVC
 
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
+        installWriter(writer, vInput, adaptor)
 
-        sessionLock.lock()
-        self.assetWriter = writer
-        self.videoInput = vInput
-        self.pixelBufferAdaptor = adaptor
-        self.isPausedInternal = false
-        self.isAudioMutedInternal = false
-        self.totalPauseOffset = .zero
-        self.basePTS = Self.hostNow()
-        self.lastVideoPTS = .invalid
-        sessionLock.unlock()
-
-        for s in streams { try await s.start(fps: fps, showCursor: showCursor) }
-        self.displays = streams
+        // Потоки регистрируем по мере старта — при ошибке abortPipeline остановит уже запущенные
+        self.displays = []
+        for s in streams {
+            try await s.start(fps: fps, showCursor: showCursor)
+            self.displays.append(s)
+        }
         if recordAudio { startMicrophoneCapture() }
 
         let timer = DispatchSource.makeTimerSource(queue: composeQueue)
@@ -1187,6 +1201,37 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable, AVC
             self.isAudioMuted = false
             self.onStateChange?(.recording)
         }
+    }
+
+    private func installWriter(_ writer: AVAssetWriter, _ vInput: AVAssetWriterInput, _ adaptor: AVAssetWriterInputPixelBufferAdaptor) {
+        sessionLock.lock()
+        assetWriter = writer
+        videoInput = vInput
+        pixelBufferAdaptor = adaptor
+        isPausedInternal = false
+        isAudioMutedInternal = false
+        totalPauseOffset = .zero
+        basePTS = Self.hostNow()
+        lastVideoPTS = .invalid
+        sessionLock.unlock()
+    }
+
+    /// Откат неудачного старта: потоки, writer, недописанный файл
+    private func abortPipeline() async {
+        composeTimer?.cancel(); composeTimer = nil
+        audioSession?.stopRunning(); audioSession = nil
+        for d in displays { await d.stop() }
+        displays = []
+        if let w = detachWriter(), w.status == .writing { w.cancelWriting() }
+        if let f = outputFileURL { try? FileManager.default.removeItem(at: f) }
+    }
+
+    private func detachWriter() -> AVAssetWriter? {
+        sessionLock.lock(); defer { sessionLock.unlock() }
+        let writer = assetWriter
+        assetWriter = nil; videoInput = nil; audioInput = nil; pixelBufferAdaptor = nil
+        basePTS = .zero
+        return writer
     }
 
     private func startMicrophoneCapture() {
@@ -1992,7 +2037,6 @@ final class QScreenDragSourceView: NSView, NSDraggingSource {
         let pbItem = NSPasteboardItem()
         pbItem.setString(fileURL.absoluteString, forType: .fileURL)
         pbItem.setString(fileURL.absoluteString, forType: NSPasteboard.PasteboardType("public.file-url"))
-        pbItem.setPropertyList([fileURL.path], forType: NSPasteboard.PasteboardType("NSFilenamesPboardType"))
 
         if ext == "png" {
             pbItem.setData(data, forType: .png)
@@ -2794,6 +2838,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApplication.shared.setActivationPolicy(.regular)
         setupMenuBar()
         setupHotkeys()
+        if !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() } // без этого скриншоты — просто обои
         UpdateChecker.checkForUpdates(isUserInitiated: false)
     }
 
