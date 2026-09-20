@@ -10,6 +10,7 @@ import ServiceManagement
 import AVFoundation
 import ImageIO
 import ScreenCaptureKit
+import Combine
 
 // --- OTA Автообновление через GitHub ---
 public enum UpdateChecker {
@@ -2034,22 +2035,17 @@ final class QScreenDragSourceView: NSView, NSDraggingSource {
         let fileURL = tempDir.appendingPathComponent(fileName)
         try? data.write(to: fileURL, options: .atomic)
 
+        // Минимальный набор типов: лишние/невалидные типы ломают бридж в NSItemProvider,
+        // из-за чего Catalyst-приложения (WhatsApp) не видят перетаскиваемый элемент вообще.
         let pbItem = NSPasteboardItem()
-        pbItem.setString(fileURL.absoluteString, forType: .fileURL)
-        pbItem.setString(fileURL.absoluteString, forType: NSPasteboard.PasteboardType("public.file-url"))
-
-        if ext == "png" {
-            pbItem.setData(data, forType: .png)
-            pbItem.setData(data, forType: NSPasteboard.PasteboardType("public.png"))
-        } else if ext == "jpg" || ext == "jpeg" {
-            pbItem.setData(data, forType: NSPasteboard.PasteboardType("public.jpeg"))
-        } else if ext == "heic" {
-            pbItem.setData(data, forType: NSPasteboard.PasteboardType(UTType.heic.identifier))
+        pbItem.setData(fileURL.dataRepresentation, forType: .fileURL)   // NSURL пишет file-url как DATA, не строку
+        switch ext {
+        case "png":         pbItem.setData(data, forType: .png)
+        case "jpg", "jpeg": pbItem.setData(data, forType: NSPasteboard.PasteboardType(UTType.jpeg.identifier))
+        case "heic":        pbItem.setData(data, forType: NSPasteboard.PasteboardType(UTType.heic.identifier))
+        case "pdf":         pbItem.setData(data, forType: NSPasteboard.PasteboardType(UTType.pdf.identifier))
+        default: break
         }
-        if let tiff = img.tiffRepresentation {
-            pbItem.setData(tiff, forType: .tiff)
-        }
-        pbItem.setString(fileURL.path, forType: .string)
 
         let item = NSDraggingItem(pasteboardWriter: pbItem)
         let thumbSize = NSSize(width: 50, height: 35)
@@ -2582,6 +2578,10 @@ struct SettingsWindowView: View {
     @AppStorage("filenameDateFormat") private var filenameDateFormat = "dd.MM.yyyy_HH.mm.ss"
     @AppStorage("defaultSaveFolderPath") private var defaultSaveFolderPath = ""
     @AppStorage("directSaveEnabled") private var directSaveEnabled = false
+    @State private var folderDisplay: String = {
+        let p = UserDefaults.standard.string(forKey: "defaultSaveFolderPath") ?? ""
+        return p.isEmpty ? "Рабочий стол (Desktop)" : (p as NSString).lastPathComponent
+    }()
 
     @AppStorage("videoFormat") private var videoFormat = "mp4"
     @AppStorage("videoCodec") private var videoCodec = "hevc"
@@ -2761,7 +2761,7 @@ struct SettingsWindowView: View {
                     HStack(spacing: 12) {
                         Text("Папка:")
                             .frame(width: 140, alignment: .leading)
-                        Text(currentFolderDisplay)
+                        Text(folderDisplay)
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.white)
                             .frame(width: 150, alignment: .leading)
@@ -2820,6 +2820,7 @@ struct SettingsWindowView: View {
         openPanel.prompt = "Выбрать"
         if openPanel.runModal() == .OK, let url = openPanel.url {
             defaultSaveFolderPath = url.path
+            folderDisplay = url.lastPathComponent
         }
     }
 }
