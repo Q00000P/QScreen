@@ -12,9 +12,15 @@ cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 if [ -d .build/release/KeyboardShortcuts_KeyboardShortcuts.bundle ]; then
   cp -R .build/release/KeyboardShortcuts_KeyboardShortcuts.bundle "$APP/Contents/Resources/"
 fi
+
 # Стабильная подпись: TCC (Запись экрана) привязывается к сертификату, а не к хэшу бинарника.
 # Один раз: Связка ключей → Ассистент сертификации → Создать сертификат → "QScreen Dev", тип "Подпись кода".
 SIGN_ID="${SIGN_ID:-}"
 if [ -z "$SIGN_ID" ] && security find-identity -v -p codesigning 2>/dev/null | grep -q "QScreen Dev"; then SIGN_ID="QScreen Dev"; fi
 codesign --force --deep --sign "${SIGN_ID:--}" "$APP"
+
+# На чужом маке скачанный zip несёт com.apple.quarantine → без Developer ID Gatekeeper блокирует запуск
+# ("файл повреждён" / "не удалось подтвердить"). Снимаем атрибут здесь же, до архивации для релиза.
+xattr -cr "$APP"
+
 echo "OK: $APP (sign: ${SIGN_ID:-ad-hoc})"
