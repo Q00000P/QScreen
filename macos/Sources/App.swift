@@ -341,6 +341,9 @@ final class ScrollCaptureManager {
     private var targetQuartzRect: CGRect = .zero
     private var capturedFrames: [NSImage] = []
     private var onFinished: ((NSImage) -> Void)?
+    private var session = 0              // поздний ответ захвата от отменённой сессии не должен попасть в новую
+    private var pendingCaptures = 0
+    private var finishRequested = false
 
     var isActive: Bool { panelWindow != nil }
 
@@ -355,17 +358,30 @@ final class ScrollCaptureManager {
     }
 
     func captureCurrentFrame() {
-        if let img = CaptureEngine.shared.capture(quartzRect: targetQuartzRect) {
-            capturedFrames.append(img)
-            updatePanel()
+        let token = session
+        pendingCaptures += 1
+        CaptureEngine.shared.capture(quartzRect: targetQuartzRect) { [weak self] img in
+            guard let self = self, token == self.session else { return }
+            self.pendingCaptures -= 1
+            if let img = img {
+                self.capturedFrames.append(img)
+                self.updatePanel()
+            }
+            if self.finishRequested && self.pendingCaptures == 0 { self.finishSession() }
         }
     }
 
     func finishSession() {
+        // «Готово» нажали, пока последний кадр ещё снимается — дождаться его
+        if pendingCaptures > 0 { finishRequested = true; return }
+        finishRequested = false
         closePanel()
-        if let stitched = ScrollStitcher.stitch(frames: capturedFrames) {
+        let frames = capturedFrames
+        capturedFrames.removeAll()
+        session += 1
+        if let stitched = ScrollStitcher.stitch(frames: frames) {
             onFinished?(stitched)
-        } else if let first = capturedFrames.first {
+        } else if let first = frames.first {
             onFinished?(first)
         }
     }
@@ -373,6 +389,9 @@ final class ScrollCaptureManager {
     func cancelSession() {
         closePanel()
         capturedFrames.removeAll()
+        session += 1
+        pendingCaptures = 0
+        finishRequested = false
     }
 
     private func showControlPanel() {
@@ -397,7 +416,7 @@ final class ScrollCaptureManager {
             frameCount: capturedFrames.count,
             onAddFrame: { [weak self] in self?.captureCurrentFrame() },
             onFinish: { [weak self] in self?.finishSession() },
-            onCancel: { [weak self] in self?.cancelSession() }
+            onCancel: { [weak self] in self?.cancelSession(); AppDelegate.shared?.restoreSuspendedEditor() }
         ))
 
         win.makeKeyAndOrderFront(nil)
@@ -409,7 +428,7 @@ final class ScrollCaptureManager {
             frameCount: capturedFrames.count,
             onAddFrame: { [weak self] in self?.captureCurrentFrame() },
             onFinish: { [weak self] in self?.finishSession() },
-            onCancel: { [weak self] in self?.cancelSession() }
+            onCancel: { [weak self] in self?.cancelSession(); AppDelegate.shared?.restoreSuspendedEditor() }
         ))
     }
 
@@ -526,32 +545,123 @@ final class WindowDetector {
     }
 }
 
+/// Захват скриншотов.
+/// macOS 14+: ScreenCaptureKit (SCScreenshotManager) — каждый раз свежий кадр компоновщика, окна самого QScreen
+/// (оверлей, редактор, панели) исключены фильтром, закреплённые (Pin) — оставлены.
+/// CGWindowListCreateImage на macOS 15+ устарел, а на 26+ работает через совместимый слой: медленно и может
+/// отдавать закешированный буфер — в новые скрины попадали куски прошлых.
 @MainActor
 final class CaptureEngine {
     static let shared = CaptureEngine()
     private init() {}
 
-    func capture(quartzRect: CGRect) -> NSImage? {
-        guard quartzRect.width > 2 && quartzRect.height > 2,
-              let cgImage = CGWindowListCreateImage(quartzRect, .optionOnScreenOnly, kCGNullWindowID, .bestResolution) else { return nil }
-        playShutterSound()
-        return NSImage(cgImage: cgImage, size: quartzRect.size)
+    /// Область в Quartz-координатах (points, верх-лево primary). Может лежать на нескольких дисплеях.
+    func capture(quartzRect: CGRect, completion: @escaping (NSImage?) -> Void) {
+        guard quartzRect.width > 2 && quartzRect.height > 2 else { completion(nil); return }
+        let scale = Coord.screen(for: Coord.toAppKit(quartzRect)).backingScaleFactor
+        let keep = AppDelegate.shared?.pinnedWindowIDs ?? []
+        Task { @MainActor in
+            let img = await Self.captureRect(quartzRect, scale: scale, keepWindowIDs: keep)
+            if img != nil { playShutterSound() }
+            completion(img)
+        }
     }
 
-    func captureWindow(target: WindowTarget) -> NSImage? {
-        if let cgImage = CGWindowListCreateImage(.null, .optionIncludingWindow, target.id, [.bestResolution, .boundsIgnoreFraming]) {
-            playShutterSound()
-            let scale = Coord.screen(for: target.appKitFrame).backingScaleFactor
-            let size = NSSize(width: CGFloat(cgImage.width) / scale, height: CGFloat(cgImage.height) / scale)
-            return NSImage(cgImage: cgImage, size: size)
+    /// Одно окно целиком, без перекрывающих окон и без тени
+    func captureWindow(target: WindowTarget, completion: @escaping (NSImage?) -> Void) {
+        let scale = Coord.screen(for: target.appKitFrame).backingScaleFactor
+        let keep = AppDelegate.shared?.pinnedWindowIDs ?? []
+        Task { @MainActor in
+            var img = await Self.captureSingleWindow(target.id, scale: scale)
+            if img == nil { img = await Self.captureRect(target.quartzFrame, scale: scale, keepWindowIDs: keep) }
+            if img != nil { playShutterSound() }
+            completion(img)
         }
-        return capture(quartzRect: target.quartzFrame)
     }
 
     /// Экран под курсором целиком
-    func captureFullScreen() -> NSImage? {
+    func captureFullScreen(completion: @escaping (NSImage?) -> Void) {
         let screen = Coord.screen(containing: NSEvent.mouseLocation)
-        return capture(quartzRect: Coord.toQuartz(screen.frame))
+        capture(quartzRect: Coord.toQuartz(screen.frame), completion: completion)
+    }
+
+    // MARK: - Реализация
+
+    private static func captureRect(_ rectQ: CGRect, scale: CGFloat, keepWindowIDs: Set<CGWindowID>) async -> NSImage? {
+        guard #available(macOS 14.0, *) else {
+            // Старый путь: даём компоновщику убрать оверлей
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            guard let cg = CGWindowListCreateImage(rectQ, .optionOnScreenOnly, kCGNullWindowID, .bestResolution) else { return nil }
+            return NSImage(cgImage: cg, size: rectQ.size)
+        }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let me = content.applications.filter { $0.processID == getpid() }
+            let keep = content.windows.filter { keepWindowIDs.contains($0.windowID) }
+
+            // Дисплеи — последовательно: параллельные запросы replayd всё равно сериализует, да ещё со штрафом
+            var pieces: [(CGImage, CGRect)] = []
+            for d in content.displays {
+                let inter = rectQ.intersection(d.frame)
+                guard !inter.isNull, inter.width >= 1, inter.height >= 1 else { continue }
+                let filter = SCContentFilter(display: d, excludingApplications: me, exceptingWindows: keep)
+                let cfg = SCStreamConfiguration()
+                cfg.sourceRect = inter.offsetBy(dx: -d.frame.minX, dy: -d.frame.minY)   // points, локально для дисплея, верх-лево
+                cfg.width = max(1, Int((inter.width * scale).rounded()))
+                cfg.height = max(1, Int((inter.height * scale).rounded()))
+                cfg.showsCursor = false
+                cfg.captureResolution = .best
+                let img = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg)
+                pieces.append((img, inter))
+            }
+            guard let first = pieces.first else { return nil }
+
+            // Один дисплей покрыл всю область — отдаём как есть, без перекодирования
+            if pieces.count == 1 && first.1.equalTo(rectQ) {
+                return NSImage(cgImage: first.0, size: rectQ.size)
+            }
+
+            // Область на стыке дисплеев — собираем из кусков
+            let W = max(1, Int((rectQ.width * scale).rounded())), H = max(1, Int((rectQ.height * scale).rounded()))
+            let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+            // Цветовое пространство дисплея (P3) — чтобы не терять цвета; если для битмапа не годится — sRGB
+            guard let ctx = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0, space: first.0.colorSpace ?? srgb, bitmapInfo: info)
+                         ?? CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0, space: srgb, bitmapInfo: info) else { return nil }
+            for (img, inter) in pieces {
+                let dst = CGRect(x: (inter.minX - rectQ.minX) * scale, y: (rectQ.maxY - inter.maxY) * scale,
+                                 width: inter.width * scale, height: inter.height * scale)
+                ctx.draw(img, in: dst)
+            }
+            guard let cg = ctx.makeImage() else { return nil }
+            return NSImage(cgImage: cg, size: rectQ.size)
+        } catch {
+            NSLog("QScreen capture failed: \(error)")
+            return nil
+        }
+    }
+
+    private static func captureSingleWindow(_ id: CGWindowID, scale: CGFloat) async -> NSImage? {
+        guard #available(macOS 14.0, *) else {
+            guard let cg = CGWindowListCreateImage(.null, .optionIncludingWindow, id, [.bestResolution, .boundsIgnoreFraming]) else { return nil }
+            return NSImage(cgImage: cg, size: NSSize(width: CGFloat(cg.width) / scale, height: CGFloat(cg.height) / scale))
+        }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let w = content.windows.first(where: { $0.windowID == id }) else { return nil }
+            let filter = SCContentFilter(desktopIndependentWindow: w)
+            let cfg = SCStreamConfiguration()
+            cfg.width = max(1, Int((w.frame.width * scale).rounded()))
+            cfg.height = max(1, Int((w.frame.height * scale).rounded()))
+            cfg.showsCursor = false
+            cfg.ignoreShadowsSingleWindow = true
+            cfg.captureResolution = .best
+            let cg = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg)
+            return NSImage(cgImage: cg, size: NSSize(width: CGFloat(cg.width) / scale, height: CGFloat(cg.height) / scale))
+        } catch {
+            NSLog("QScreen window capture failed: \(error)")
+            return nil
+        }
     }
 }
 
@@ -1855,7 +1965,7 @@ final class OverlayManager {
             let view = ScreenOverlayView(frame: NSRect(origin: .zero, size: screen.frame.size), mode: mode, state: state, windows: windows)
             view.onRect = { [weak self] r in self?.closeOverlay(); onRect(r) }
             view.onWindow = { [weak self] t in self?.closeOverlay(); onWindow?(t) }
-            view.onCancel = { [weak self] in self?.closeOverlay() }
+            view.onCancel = { [weak self] in self?.closeOverlay(); AppDelegate.shared?.restoreSuspendedEditor() }
             view.redrawAll = { [weak self] in self?.views.forEach { $0.needsDisplay = true } }
             window.contentView = view
 
@@ -1877,8 +1987,8 @@ final class OverlayManager {
                 if isScrollMode {
                     ScrollCaptureManager.shared.startScrollingSession(quartzRect: qRect) { stitchedImg in onSelected(stitchedImg) }
                 } else {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                        if let img = CaptureEngine.shared.capture(quartzRect: qRect) { onSelected(img) }
+                    CaptureEngine.shared.capture(quartzRect: qRect) { img in
+                        if let img = img { onSelected(img) } else { AppDelegate.shared?.restoreSuspendedEditor() }
                     }
                 }
             }
@@ -1887,13 +1997,12 @@ final class OverlayManager {
 
     func showSmartCombinedOverlay(onSelected: @escaping (NSImage) -> Void) {
         show(mode: .smart, onRect: { akRect in
-            let qRect = Coord.toQuartz(akRect)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                if let img = CaptureEngine.shared.capture(quartzRect: qRect) { onSelected(img) }
+            CaptureEngine.shared.capture(quartzRect: Coord.toQuartz(akRect)) { img in
+                if let img = img { onSelected(img) } else { AppDelegate.shared?.restoreSuspendedEditor() }
             }
         }, onWindow: { target in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                if let img = CaptureEngine.shared.captureWindow(target: target) { onSelected(img) }
+            CaptureEngine.shared.captureWindow(target: target) { img in
+                if let img = img { onSelected(img) } else { AppDelegate.shared?.restoreSuspendedEditor() }
             }
         })
     }
@@ -2833,6 +2942,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var editorWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var pinnedWindows: [NSWindow] = []
+    /// Закреплённые скрины остаются видимыми в новых снимках (остальные окна QScreen исключаются)
+    var pinnedWindowIDs: Set<CGWindowID> {
+        Set(pinnedWindows.filter { $0.isVisible }.map { CGWindowID($0.windowNumber) })
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -2907,6 +3020,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         OverlayManager.shared.closeOverlay()
         ScrollCaptureManager.shared.cancelSession()
         FloatingThumbnailManager.shared.dismiss()
+        suspendEditor()
+    }
+
+    /// Редактор прошлого скрина остаётся открытым после Drag&Drop (в отличие от «Готово»). Активация оверлея
+    /// поднимала его поверх остальных окон, и он попадал в новый снимок — отсюда «прошлая картинка на новом скрине».
+    /// На время захвата прячем его; отменили захват — возвращаем, сняли новый — его заменит новый редактор.
+    private var suspendedEditor: NSWindow?
+
+    private func suspendEditor() {
+        guard let w = editorWindow, w.isVisible else { return }
+        w.orderOut(nil)
+        suspendedEditor = w
+    }
+
+    func restoreSuspendedEditor() {
+        guard let w = suspendedEditor else { return }
+        suspendedEditor = nil
+        guard w === editorWindow else { return }
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc func captureAreaAction() {
@@ -2958,7 +3091,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func captureScreenAction() {
         resetPending()
-        if let img = CaptureEngine.shared.captureFullScreen() { openEditor(img) }
+        CaptureEngine.shared.captureFullScreen { [weak self] img in
+            if let img = img { self?.openEditor(img) } else { self?.restoreSuspendedEditor() }
+        }
     }
 
     @objc func openSettingsAction() {
@@ -3015,6 +3150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func closeEditor() {
         editorWindow?.orderOut(nil)
         editorWindow = nil
+        suspendedEditor = nil
     }
 
     func windowWillClose(_ notification: Notification) {
