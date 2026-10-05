@@ -579,6 +579,85 @@ final class CaptureEngine {
         }
     }
 
+    /// Снимок дисплея целиком, сделанный ДО показа оверлея
+    struct FrozenDisplay {
+        let displayID: CGDirectDisplayID
+        let quartzFrame: CGRect     // points, Quartz-глобально
+        let image: CGImage
+    }
+
+    /// Заморозка как у штатного скриншоттера: снимаем все дисплеи сразу по хоткею, пока всплывающие меню и подсказки
+    /// ещё на экране (активация оверлея их закрывает). Оверлей показывает этот кадр, область вырезается из него же —
+    /// что видишь при выделении, то и получишь. Пустой массив — заморозка недоступна (macOS 13 / ошибка), работаем вживую.
+    func freezeAllDisplays(completion: @escaping ([FrozenDisplay]) -> Void) {
+        let keep = AppDelegate.shared?.pinnedWindowIDs ?? []
+        var scales: [CGDirectDisplayID: CGFloat] = [:]
+        for sc in NSScreen.screens {
+            if let id = (sc.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value { scales[id] = sc.backingScaleFactor }
+        }
+        let cursorQ = Coord.toQuartz(CGRect(origin: NSEvent.mouseLocation, size: .zero)).origin
+        Task { @MainActor in
+            guard #available(macOS 14.0, *) else { completion([]); return }
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                let me = content.applications.filter { $0.processID == getpid() }
+                let keepW = content.windows.filter { keep.contains($0.windowID) }
+                // Дисплей под курсором — первым; остальные по очереди (параллельно replayd всё равно сериализует)
+                let displays = content.displays.filter { $0.frame.contains(cursorQ) } + content.displays.filter { !$0.frame.contains(cursorQ) }
+                var out: [FrozenDisplay] = []
+                for d in displays {
+                    let scale = scales[d.displayID] ?? 2.0
+                    let cfg = SCStreamConfiguration()
+                    cfg.width = max(1, Int((CGFloat(d.width) * scale).rounded()))
+                    cfg.height = max(1, Int((CGFloat(d.height) * scale).rounded()))
+                    cfg.showsCursor = false
+                    cfg.captureResolution = .best
+                    let filter = SCContentFilter(display: d, excludingApplications: me, exceptingWindows: keepW)
+                    let img = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg)
+                    out.append(FrozenDisplay(displayID: d.displayID, quartzFrame: d.frame, image: img))
+                }
+                completion(out)
+            } catch {
+                NSLog("QScreen freeze failed: \(error)")
+                completion([])
+            }
+        }
+    }
+
+    /// Вырезать область (Quartz, points) из замороженных кадров; на стыке дисплеев — склейка
+    func image(fromFrozen frozen: [FrozenDisplay], quartzRect rectQ: CGRect) -> NSImage? {
+        guard rectQ.width > 2, rectQ.height > 2 else { return nil }
+        var pieces: [(CGImage, CGRect)] = []
+        var outScale: CGFloat = 1
+        var bestArea: CGFloat = -1
+        for fd in frozen {
+            let inter = rectQ.intersection(fd.quartzFrame)
+            guard !inter.isNull, inter.width >= 1, inter.height >= 1 else { continue }
+            let k = CGFloat(fd.image.width) / fd.quartzFrame.width          // пикселей на point у этого дисплея
+            let px = CGRect(x: (inter.minX - fd.quartzFrame.minX) * k, y: (inter.minY - fd.quartzFrame.minY) * k,
+                            width: inter.width * k, height: inter.height * k).integral   // CGImage: начало координат сверху-слева
+            guard let piece = fd.image.cropping(to: px) else { continue }
+            pieces.append((piece, inter))
+            if inter.width * inter.height > bestArea { bestArea = inter.width * inter.height; outScale = k }
+        }
+        guard let first = pieces.first else { return nil }
+        playShutterSound()
+        if pieces.count == 1 && first.1.equalTo(rectQ) {
+            return NSImage(cgImage: first.0, size: rectQ.size)
+        }
+        let W = max(1, Int((rectQ.width * outScale).rounded())), H = max(1, Int((rectQ.height * outScale).rounded()))
+        let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0, space: first.0.colorSpace ?? srgb, bitmapInfo: info)
+                     ?? CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0, space: srgb, bitmapInfo: info) else { return nil }
+        for (img, inter) in pieces {
+            ctx.draw(img, in: CGRect(x: (inter.minX - rectQ.minX) * outScale, y: (rectQ.maxY - inter.maxY) * outScale,
+                                     width: inter.width * outScale, height: inter.height * outScale))
+        }
+        guard let cg = ctx.makeImage() else { return nil }
+        return NSImage(cgImage: cg, size: rectQ.size)
+    }
+
     /// Экран под курсором целиком
     func captureFullScreen(completion: @escaping (NSImage?) -> Void) {
         let screen = Coord.screen(containing: NSEvent.mouseLocation)
@@ -1831,9 +1910,10 @@ final class ScreenOverlayView: NSView {
     var onWindow: ((WindowTarget) -> Void)?
     var onCancel: (() -> Void)?
     var redrawAll: (() -> Void)?
+    let frozen: CGImage?            // замороженный кадр этого экрана; nil — живой прозрачный оверлей
 
-    init(frame: NSRect, mode: OverlayMode, state: SelectionState, windows: [WindowTarget]) {
-        self.mode = mode; self.state = state; self.windows = windows
+    init(frame: NSRect, mode: OverlayMode, state: SelectionState, windows: [WindowTarget], frozen: CGImage? = nil) {
+        self.mode = mode; self.state = state; self.windows = windows; self.frozen = frozen
         super.init(frame: frame)
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -1898,8 +1978,9 @@ final class ScreenOverlayView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        if let img = frozen { NSGraphicsContext.current?.cgContext.draw(img, in: bounds) }
         NSColor.black.withAlphaComponent(mode == .smart ? 0.32 : 0.35).setFill()
-        dirtyRect.fill()
+        dirtyRect.fill(using: .sourceOver)
 
         if mode == .smart, !state.isDragging, let win = state.hovered {
             let wf = win.appKitFrame
@@ -1923,7 +2004,11 @@ final class ScreenOverlayView: NSView {
         let mouseLocal = local(state.mouse)
         if state.isDragging, let r = state.rect, r.width > 1, r.height > 1 {
             let lr = NSRect(origin: local(r.origin), size: r.size)
-            NSGraphicsContext.current?.cgContext.clear(lr)
+            if let img = frozen, let ctx = NSGraphicsContext.current?.cgContext {
+                ctx.saveGState(); ctx.clip(to: lr); ctx.draw(img, in: bounds); ctx.restoreGState()
+            } else {
+                NSGraphicsContext.current?.cgContext.clear(lr)
+            }
             let strokeColor: NSColor = mode == .record ? .systemRed : (mode == .scroll ? .systemPurple : .white)
             strokeColor.setStroke()
             let path = NSBezierPath(rect: lr)
@@ -1946,8 +2031,20 @@ final class OverlayManager {
     private init() {}
 
     var isActive: Bool { !overlayWindows.isEmpty }
+    private var token = 0           // хоткей нажали повторно, пока шла заморозка — старый результат не показываем
 
-    private func show(mode: OverlayMode, onRect: @escaping (CGRect) -> Void, onWindow: ((WindowTarget) -> Void)? = nil) {
+    /// Сначала заморозить экран, потом показать оверлей поверх замороженного кадра
+    private func showFrozen(mode: OverlayMode, onRect: @escaping (CGRect, [CaptureEngine.FrozenDisplay]) -> Void,
+                            onWindow: ((WindowTarget) -> Void)? = nil) {
+        closeOverlay()
+        let t = token
+        CaptureEngine.shared.freezeAllDisplays { [weak self] frozen in
+            guard let self = self, t == self.token else { return }
+            self.show(mode: mode, frozen: frozen, onRect: { r in onRect(r, frozen) }, onWindow: onWindow)
+        }
+    }
+
+    private func show(mode: OverlayMode, frozen: [CaptureEngine.FrozenDisplay] = [], onRect: @escaping (CGRect) -> Void, onWindow: ((WindowTarget) -> Void)? = nil) {
         closeOverlay()
         let state = SelectionState()
         let windows = mode == .smart ? WindowDetector.getVisibleWindows() : []
@@ -1962,7 +2059,9 @@ final class OverlayManager {
             window.acceptsMouseMovedEvents = true
             window.isReleasedWhenClosed = false
 
-            let view = ScreenOverlayView(frame: NSRect(origin: .zero, size: screen.frame.size), mode: mode, state: state, windows: windows)
+            let sid = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+            let frozenImg = frozen.first { $0.displayID == sid }?.image
+            let view = ScreenOverlayView(frame: NSRect(origin: .zero, size: screen.frame.size), mode: mode, state: state, windows: windows, frozen: frozenImg)
             view.onRect = { [weak self] r in self?.closeOverlay(); onRect(r) }
             view.onWindow = { [weak self] t in self?.closeOverlay(); onWindow?(t) }
             view.onCancel = { [weak self] in self?.closeOverlay(); AppDelegate.shared?.restoreSuspendedEditor() }
@@ -1979,6 +2078,18 @@ final class OverlayManager {
 
     func showAreaOverlay(isRecordingMode: Bool = false, isScrollMode: Bool = false, onSelected: @escaping (NSImage) -> Void) {
         let mode: OverlayMode = isRecordingMode ? .record : (isScrollMode ? .scroll : .area)
+        // Обычная область — по замороженному кадру (меню/подсказки попадают в скрин, граница видна)
+        if mode == .area {
+            showFrozen(mode: .area, onRect: { akRect, frozen in
+                let qRect = Coord.toQuartz(akRect)
+                if !frozen.isEmpty, let img = CaptureEngine.shared.image(fromFrozen: frozen, quartzRect: qRect) { onSelected(img); return }
+                CaptureEngine.shared.capture(quartzRect: qRect) { img in
+                    if let img = img { onSelected(img) } else { AppDelegate.shared?.restoreSuspendedEditor() }
+                }
+            })
+            return
+        }
+        // Скролл и запись — по живому экрану
         show(mode: mode, onRect: { akRect in
             if isRecordingMode {
                 ScreenRecorder.shared.arm(initialAppKitRect: akRect)
@@ -1996,8 +2107,10 @@ final class OverlayManager {
     }
 
     func showSmartCombinedOverlay(onSelected: @escaping (NSImage) -> Void) {
-        show(mode: .smart, onRect: { akRect in
-            CaptureEngine.shared.capture(quartzRect: Coord.toQuartz(akRect)) { img in
+        showFrozen(mode: .smart, onRect: { akRect, frozen in
+            let qRect = Coord.toQuartz(akRect)
+            if !frozen.isEmpty, let img = CaptureEngine.shared.image(fromFrozen: frozen, quartzRect: qRect) { onSelected(img); return }
+            CaptureEngine.shared.capture(quartzRect: qRect) { img in
                 if let img = img { onSelected(img) } else { AppDelegate.shared?.restoreSuspendedEditor() }
             }
         }, onWindow: { target in
@@ -2008,6 +2121,7 @@ final class OverlayManager {
     }
 
     func closeOverlay() {
+        token += 1
         NSCursor.unhide()
         for w in overlayWindows { w.orderOut(nil) }
         overlayWindows.removeAll()
@@ -2196,6 +2310,14 @@ struct CaptureEditorView: View {
 
     @State private var cropStart: CGPoint?
     @State private var cropCurrent: CGPoint?
+    @State private var cropDragging = false
+
+    /// Смещение картинки внутри холста: в режиме Beautify она в рамке с отступом 36
+    private var canvasOffset: CGFloat { isBeautifyEnabled ? 36 : 0 }
+    private func toImage(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x - canvasOffset, y: p.y - canvasOffset) }
+    private func clampToImage(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: min(max(p.x, 0), currentImage.size.width), y: min(max(p.y, 0), currentImage.size.height))
+    }
 
     @State private var activeTextPos: CGPoint?
     @State private var activeTextString: String = ""
@@ -2412,15 +2534,80 @@ struct CaptureEditorView: View {
                 Color(red: 0.08, green: 0.09, blue: 0.10)
 
                 ZStack(alignment: .topLeading) {
+                    // Жест только на холсте: кнопки обрезки и поле текста поверх него остаются нажимаемыми
                     fullRenderView
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { val in
+                                    let start = toImage(val.startLocation), loc = toImage(val.location)
+                                    if selectedTool == .text { return }
+                                    if selectedTool == .crop {
+                                        if !cropDragging { cropDragging = true; cropStart = clampToImage(start) }
+                                        cropCurrent = clampToImage(loc)
+                                        return
+                                    }
+                                    if currentShape == nil {
+                                        var shape = DrawShape(tool: selectedTool, points: [start, loc], color: selectedColor, lineWidth: strokeWidth)
+                                        if selectedTool == .step { shape.stepNumber = stepCounter; stepCounter += 1 }
+                                        currentShape = shape
+                                    } else {
+                                        if selectedTool == .pen || selectedTool == .highlighter {
+                                            if let last = currentShape?.points.last, hypot(loc.x - last.x, loc.y - last.y) > 3 { currentShape?.points.append(loc) }
+                                        } else { currentShape?.points[1] = loc }
+                                    }
+                                }
+                                .onEnded { val in
+                                    let loc = toImage(val.location)
+                                    if selectedTool == .crop {
+                                        cropDragging = false
+                                        if let r = cropRect, r.width < 4 || r.height < 4 { cropStart = nil; cropCurrent = nil }
+                                        return
+                                    }
+                                    if selectedTool == .text {
+                                        commitActiveText()
+                                        activeTextPos = loc
+                                        activeTextString = ""
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isTextFocused = true }
+                                        return
+                                    }
+                                    if let shape = currentShape { items.append(.shape(shape)); currentShape = nil }
+                                }
+                        )
 
-                    if let rect = cropRect, selectedTool == .crop {
-                        ZStack(alignment: .top) {
-                            Path { $0.addRect(rect) }.stroke(Color.white, style: StrokeStyle(lineWidth: 2, dash: [5, 5]))
-                            Button(action: { applyCrop(rect) }) {
-                                HStack(spacing: 4) { Image(systemName: "crop"); Text("Обрезать") }
-                                    .font(.system(size: 11, weight: .bold)).padding(.horizontal, 8).padding(.vertical, 4).background(Color.blue).foregroundColor(.white).cornerRadius(5)
-                            }.buttonStyle(.plain).offset(y: -26)
+                    if let rect = cropRect, selectedTool == .crop, rect.width >= 4, rect.height >= 4 {
+                        let o = canvasOffset
+                        let r = rect.offsetBy(dx: o, dy: o)
+                        // Затемнение вне области + пунктир
+                        Path { p in
+                            p.addRect(CGRect(x: o, y: o, width: currentImage.size.width, height: currentImage.size.height))
+                            p.addRect(r)
+                        }
+                        .fill(Color.black.opacity(0.45), style: FillStyle(eoFill: true))
+                        .allowsHitTesting(false)
+                        Path { $0.addRect(r) }
+                            .stroke(Color.white, style: StrokeStyle(lineWidth: 2, dash: [5, 5]))
+                            .allowsHitTesting(false)
+
+                        if !cropDragging {
+                            HStack(spacing: 6) {
+                                Button(action: { applyCrop(rect) }) {
+                                    HStack(spacing: 4) { Image(systemName: "crop"); Text("Обрезать") }
+                                        .font(.system(size: 11, weight: .bold)).padding(.horizontal, 8).padding(.vertical, 4)
+                                        .background(Color.blue).foregroundColor(.white).cornerRadius(5)
+                                }
+                                .keyboardShortcut(.defaultAction)
+                                .help("Обрезать (Enter)")
+                                Button(action: { cropStart = nil; cropCurrent = nil }) {
+                                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
+                                        .padding(6).background(Color.black.opacity(0.7)).foregroundColor(.white).cornerRadius(5)
+                                }
+                                .keyboardShortcut(.cancelAction)
+                                .help("Отмена (Esc)")
+                            }
+                            .buttonStyle(.plain)
+                            .fixedSize()
+                            .position(x: r.midX, y: r.minY > 30 ? r.minY - 16 : min(r.maxY + 16, currentImage.size.height + 2 * o - 14))
                         }
                     }
 
@@ -2429,41 +2616,11 @@ struct CaptureEditorView: View {
                             .textFieldStyle(.plain).font(.system(size: 18, weight: .bold)).foregroundColor(selectedColor)
                             .padding(.horizontal, 6).padding(.vertical, 4).background(Color.black.opacity(0.85).cornerRadius(4))
                             .overlay(RoundedRectangle(cornerRadius: 4).stroke(selectedColor, lineWidth: 1.5))
-                            .fixedSize().offset(x: max(0, min(pos.x, currentImage.size.width - 60)), y: max(0, min(pos.y, currentImage.size.height - 30)))
+                            .fixedSize()
+                            .offset(x: canvasOffset + max(0, min(pos.x, currentImage.size.width - 60)), y: canvasOffset + max(0, min(pos.y, currentImage.size.height - 30)))
                             .focused($isTextFocused).onSubmit { commitActiveText() }
                     }
                 }
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { val in
-                            if selectedTool == .text { return }
-                            if selectedTool == .crop {
-                                if cropStart == nil { cropStart = val.startLocation }
-                                cropCurrent = val.location
-                                return
-                            }
-                            if currentShape == nil {
-                                var shape = DrawShape(tool: selectedTool, points: [val.startLocation, val.location], color: selectedColor, lineWidth: strokeWidth)
-                                if selectedTool == .step { shape.stepNumber = stepCounter; stepCounter += 1 }
-                                currentShape = shape
-                            } else {
-                                if selectedTool == .pen || selectedTool == .highlighter {
-                                    if let last = currentShape?.points.last, hypot(val.location.x - last.x, val.location.y - last.y) > 3 { currentShape?.points.append(val.location) }
-                                } else { currentShape?.points[1] = val.location }
-                            }
-                        }
-                        .onEnded { val in
-                            if selectedTool == .crop { return }
-                            if selectedTool == .text {
-                                commitActiveText()
-                                activeTextPos = val.location
-                                activeTextString = ""
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isTextFocused = true }
-                                return
-                            }
-                            if let shape = currentShape { items.append(.shape(shape)); currentShape = nil }
-                        }
-                )
 
                 if let toast = toastMessage {
                     Text(toast).font(.system(size: 13, weight: .semibold)).foregroundColor(.white).padding(.horizontal, 14).padding(.vertical, 8).background(Color.black.opacity(0.85)).cornerRadius(8).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(.bottom, 20)
@@ -2480,17 +2637,24 @@ struct CaptureEditorView: View {
         }
     }
 
+    /// Обрезка: рендер холста с аннотациями (без фона Beautify) и вырезка в пикселях.
+    /// CGImage.cropping считает Y сверху — прежний переворот Y вырезал зеркальную по вертикали область.
+    @MainActor
     private func applyCrop(_ rect: CGRect) {
-        guard let finalImg = renderFinalImage(),
-              let tiff = finalImg.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff) else { return }
-        let scale = finalImg.pixelScale
-        let cropPixelRect = CGRect(x: rect.origin.x * scale, y: (currentImage.size.height - rect.origin.y - rect.height) * scale, width: rect.width * scale, height: rect.height * scale)
-        guard let cgImg = bitmap.cgImage?.cropping(to: cropPixelRect) else { return }
-        let cropped = NSImage(cgImage: cgImg, size: rect.size)
-        currentImage = cropped
-        pixellatedImage = generatePixellatedImage(from: cropped)
-        items.removeAll(); cropStart = nil; cropCurrent = nil; selectedTool = .arrow
+        commitActiveText()
+        let scale = currentImage.pixelScale
+        let renderer = ImageRenderer(content: innerCanvasContent)
+        renderer.scale = scale
+        guard let cg = renderer.cgImage else { return }
+        let px = CGRect(x: rect.minX * scale, y: rect.minY * scale, width: rect.width * scale, height: rect.height * scale)
+            .integral.intersection(CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+        guard px.width >= 2, px.height >= 2, let cropped = cg.cropping(to: px) else { return }
+        let img = NSImage(cgImage: cropped, size: NSSize(width: px.width / scale, height: px.height / scale))
+        currentImage = img
+        pixellatedImage = generatePixellatedImage(from: img)
+        items.removeAll(); currentShape = nil
+        cropStart = nil; cropCurrent = nil; cropDragging = false
+        selectedTool = .arrow
     }
 
     private func runOCR() {

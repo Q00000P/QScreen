@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -19,6 +20,8 @@ namespace QScreen
         private readonly HotkeyBinding _binding;
         private readonly Action _onChanged;
         private bool _recording;
+        private IntPtr _hook = IntPtr.Zero;
+        private Win32.LowLevelKeyboardProc? _hookProc;   // держим ссылку, иначе GC соберёт делегат под живым хуком
 
         public HotkeyRecorderControl(HotkeyBinding binding, Action onChanged)
         {
@@ -27,8 +30,9 @@ namespace QScreen
             MinWidth = 180; Height = 28; Cursor = Cursors.Hand; FontWeight = FontWeights.SemiBold; FontSize = 11;
             Template = Ui.FlatTemplate();
             Update();
-            Click += (s, e) => { _recording = true; Update(); Focus(); };
-            LostFocus += (s, e) => { _recording = false; Update(); };
+            Click += (s, e) => StartRecording();
+            LostFocus += (s, e) => StopRecording();
+            Unloaded += (s, e) => StopRecording();
             PreviewKeyDown += OnKey;
         }
 
@@ -38,12 +42,52 @@ namespace QScreen
             Background = _recording ? new SolidColorBrush(Color.FromRgb(36, 120, 220)) : new SolidColorBrush(Color.FromRgb(40, 44, 52));
         }
 
+        private void StartRecording()
+        {
+            if (_recording) return;
+            _recording = true; Update(); Focus();
+            // Пока записываем — свои глобальные хоткеи снимаем, иначе уже назначенная клавиша уйдёт в захват, а не сюда
+            AppController.Shared?.SuspendHotkeys();
+            _hookProc = HookProc;
+            _hook = Win32.SetWindowsHookEx(Win32.WH_KEYBOARD_LL, _hookProc, Win32.GetModuleHandle(null), 0);
+        }
+
+        private void StopRecording()
+        {
+            if (!_recording) return;
+            _recording = false; Update();
+            if (_hook != IntPtr.Zero) { Win32.UnhookWindowsHookEx(_hook); _hook = IntPtr.Zero; }
+            AppController.Shared?.RegisterHotkeys();
+        }
+
+        private IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && _recording)
+            {
+                int msg = (int)wParam;
+                uint vk = (uint)Marshal.ReadInt32(lParam);   // KBDLLHOOKSTRUCT.vkCode
+                if ((msg == Win32.WM_KEYDOWN || msg == Win32.WM_SYSKEYDOWN) && vk == Win32.VK_SNAPSHOT)
+                {
+                    Dispatcher.BeginInvoke(new Action(() => Commit(Key.Snapshot)));
+                    return (IntPtr)1;   // не отдаём дальше — «Ножницы» не откроются
+                }
+            }
+            return Win32.CallNextHookEx(_hook, nCode, wParam, lParam);
+        }
+
         private void OnKey(object sender, KeyEventArgs e)
         {
             if (!_recording) return;
             e.Handled = true;
             var key = e.Key == Key.System ? e.SystemKey : e.Key;
-            if (key == Key.Escape) { _recording = false; Update(); return; }
+            if (key == Key.Escape) { StopRecording(); return; }
+            if (key == Key.Snapshot) return; // приходит через хук
+            Commit(key);
+        }
+
+        private void Commit(Key key)
+        {
+            if (!_recording) return;
             if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftShift or Key.RightShift or Key.LeftAlt or Key.RightAlt or Key.LWin or Key.RWin) return;
 
             uint mod = 0; var parts = new List<string>();
@@ -51,16 +95,22 @@ namespace QScreen
             if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)) { mod |= Win32.MOD_SHIFT; parts.Add("Shift"); }
             if (Keyboard.Modifiers.HasFlag(ModifierKeys.Alt)) { mod |= Win32.MOD_ALT; parts.Add("Alt"); }
             if (Keyboard.Modifiers.HasFlag(ModifierKeys.Windows)) { mod |= Win32.MOD_WIN; parts.Add("Win"); }
-            bool fkey = key >= Key.F1 && key <= Key.F24;
-            if (mod == 0 && !fkey) return; // без модификатора допустимы только F-клавиши
+            // Без модификатора допустимы только «одиночные» клавиши: F1–F24, PrintScreen, Pause, ScrollLock
+            bool standalone = (key >= Key.F1 && key <= Key.F24) || key is Key.Snapshot or Key.Pause or Key.Scroll;
+            if (mod == 0 && !standalone) return;
 
             var vk = (uint)KeyInterop.VirtualKeyFromKey(key);
-            var name = key.ToString();
+            var name = key switch
+            {
+                Key.Snapshot => "PrintScreen",   // у Snapshot и PrintScreen одно значение — имя берём явно (FromString его разберёт)
+                Key.Scroll => "Scroll",
+                _ => key.ToString()
+            };
             if (name.StartsWith("D") && name.Length == 2 && char.IsDigit(name[1])) name = name.Substring(1);
             parts.Add(name);
 
             _binding.Modifiers = mod; _binding.Key = vk; _binding.DisplayText = string.Join(" + ", parts);
-            _recording = false; Update();
+            StopRecording();
             _onChanged();
         }
     }

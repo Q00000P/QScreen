@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Windows;
 using System.Windows.Interop;
@@ -116,9 +117,17 @@ namespace QScreen
         }
 
         // ---------- Хоткеи ----------
+        /// Снять все глобальные хоткеи (на время записи нового сочетания в настройках)
+        public void SuspendHotkeys()
+        {
+            _psTimer?.Stop(); _psTimer = null;
+            for (int i = 1; i <= 7; i++) Win32.UnregisterHotKey(_msgWindow.Handle, i);
+        }
+
         public void RegisterHotkeys()
         {
             var h = _msgWindow.Handle;
+            _psTimer?.Stop(); _psTimer = null;
             for (int i = 1; i <= 7; i++) Win32.UnregisterHotKey(h, i);
             Reg(HK_AREA, AppSettings.HK_Area); Reg(HK_SMART, AppSettings.HK_Smart); Reg(HK_SCROLL, AppSettings.HK_Scroll); Reg(HK_SCREEN, AppSettings.HK_Screen);
             Reg(HK_RECORD, AppSettings.HK_Record); Reg(HK_RECORD_STOP, AppSettings.HK_RecordStop); Reg(HK_RECORD_PAUSE, AppSettings.HK_RecordPause);
@@ -128,8 +137,57 @@ namespace QScreen
         private void Reg(int id, HotkeyBinding b)
         {
             if (b.Key == 0) return;
-            if (!Win32.RegisterHotKey(_msgWindow.Handle, id, b.Modifiers | Win32.MOD_NOREPEAT, b.Key))
-                _tray.ShowBalloonTip(3000, "QScreen", $"Хоткей {b.DisplayText} занят другим приложением", Forms.ToolTipIcon.Warning);
+            if (Win32.RegisterHotKey(_msgWindow.Handle, id, b.Modifiers | Win32.MOD_NOREPEAT, b.Key)) return;
+
+            // Голый PrintScreen в Windows 11 по умолчанию забирают «Ножницы»
+            if (b.Key == Win32.VK_SNAPSHOT && b.Modifiers == 0)
+            {
+                ReleasePrintScreenFromSnipping(id, b);
+                return;
+            }
+            _tray.ShowBalloonTip(3000, "QScreen", $"Хоткей {b.DisplayText} занят другим приложением", Forms.ToolTipIcon.Warning);
+        }
+
+        // ---------- PrintScreen ↔ «Ножницы» ----------
+        private System.Windows.Threading.DispatcherTimer? _psTimer;
+        private bool _psPrompted;
+
+        private void ReleasePrintScreenFromSnipping(int id, HotkeyBinding b)
+        {
+            // 1) Выключаем привязку в реестре (тот же флаг, что и переключатель в Параметрах)
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Control Panel\Keyboard");
+                key.SetValue("PrintScreenKeyForSnippingEnabled", 0, Microsoft.Win32.RegistryValueKind.DWord);
+            }
+            catch { }
+            if (Win32.RegisterHotKey(_msgWindow.Handle, id, b.Modifiers | Win32.MOD_NOREPEAT, b.Key)) return;
+
+            // 2) Система ещё держит клавишу — открываем переключатель и ждём, пока его выключат (до 2 минут)
+            if (!_psPrompted)
+            {
+                _psPrompted = true;
+                MessageBox.Show("Клавишу PrintScreen сейчас занимают «Ножницы» Windows.\n\nСейчас откроются Параметры → Специальные возможности → Клавиатура.\nВыключи «Использовать клавишу Print Screen для открытия инструмента «Ножницы»» — QScreen подхватит клавишу сам.",
+                    "QScreen — PrintScreen", MessageBoxButton.OK, MessageBoxImage.Information);
+                try { Process.Start(new ProcessStartInfo("ms-settings:easeofaccess-keyboard") { UseShellExecute = true }); } catch { }
+            }
+            var started = DateTime.Now;
+            _psTimer?.Stop();
+            _psTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _psTimer.Tick += (s, e) =>
+            {
+                if (Win32.RegisterHotKey(_msgWindow.Handle, id, b.Modifiers | Win32.MOD_NOREPEAT, b.Key))
+                {
+                    _psTimer?.Stop(); _psTimer = null;
+                    _tray.ShowBalloonTip(2500, "QScreen", "PrintScreen назначен", Forms.ToolTipIcon.Info);
+                }
+                else if ((DateTime.Now - started).TotalMinutes > 2)
+                {
+                    _psTimer?.Stop(); _psTimer = null;
+                    _tray.ShowBalloonTip(4000, "QScreen", "PrintScreen всё ещё занят «Ножницами» — выключи привязку в Параметрах и перезапусти QScreen", Forms.ToolTipIcon.Warning);
+                }
+            };
+            _psTimer.Start();
         }
 
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)

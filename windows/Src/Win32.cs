@@ -93,6 +93,17 @@ namespace QScreen
         public const int WM_HOTKEY = 0x0312;
         public const int WM_DPICHANGED = 0x02E0;
 
+        // Низкоуровневый хук клавиатуры: только он надёжно видит нажатие PrintScreen
+        // (обычному окну Windows шлёт для VK_SNAPSHOT лишь отпускание, а Win11 перехватывает клавишу под «Ножницы»)
+        public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+        [DllImport("user32.dll", SetLastError = true)] public static extern bool UnhookWindowsHookEx(IntPtr hhk);
+        [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandle(string? lpModuleName);
+        public const int WH_KEYBOARD_LL = 13;
+        public const int WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104;
+        public const uint VK_SNAPSHOT = 0x2C;
+
         public static void ApplyDarkMode(Window window)
         {
             window.SourceInitialized += (s, e) =>

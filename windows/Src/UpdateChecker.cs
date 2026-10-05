@@ -49,7 +49,7 @@ namespace QScreen
     public static class UpdateChecker
     {
         public const string CurrentVersion = "10.1.0";
-        public const string BuildTag = "w8"; // метка сборки для трея — поднимать при каждой правке
+        public const string BuildTag = "w10"; // метка сборки для трея — поднимать при каждой правке
         public const string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)
@@ -76,12 +76,17 @@ namespace QScreen
                             { zipUrl = a.GetProperty("browser_download_url").GetString() ?? ""; break; }
                         }
 
+                    // Тег новее, но виндового ассета нет — релиз не для этой платформы, не дёргаем
+                    if (zipUrl.Length == 0)
+                    {
+                        if (isUserInitiated) MessageBox.Show($"Релиз v{remoteVer} не содержит сборку для Windows.\nТекущая версия: v{CurrentVersion}.", "Обновлений нет", MessageBoxButton.OK, MessageBoxImage.Information);
+                        return;
+                    }
+
                     var r = MessageBox.Show($"Доступна новая версия QScreen v{remoteVer}!\nТекущая: v{CurrentVersion}\n\nСкачать и установить обновление автоматически?",
                         "Обновление QScreen", MessageBoxButton.YesNo, MessageBoxImage.Information);
                     if (r != MessageBoxResult.Yes) return;
-
-                    if (zipUrl.Length > 0) await PerformSilentUpdate(zipUrl, remoteVer);
-                    else Process.Start(new ProcessStartInfo(root.GetProperty("html_url").GetString() ?? "") { UseShellExecute = true });
+                    await PerformSilentUpdate(zipUrl, remoteVer);
                 }
                 else if (isUserInitiated)
                 {
