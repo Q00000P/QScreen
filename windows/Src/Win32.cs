@@ -104,6 +104,21 @@ namespace QScreen
         public const int WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104;
         public const uint VK_SNAPSHOT = 0x2C;
 
+        // Синтетическое колесо для авто-прокрутки скролл-захвата
+        [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+        [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public MOUSEINPUT mi; }
+        [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+        [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+        public const uint INPUT_MOUSE = 0, MOUSEEVENTF_WHEEL = 0x0800;
+
+        /// <summary>Курсор в точку (физ. пиксели) и колесо: notches &lt; 0 — вниз по странице</summary>
+        public static void Wheel(System.Drawing.Point at, int notches)
+        {
+            SetCursorPos(at.X, at.Y);   // колесо получает окно под курсором
+            var input = new INPUT { type = INPUT_MOUSE, mi = new MOUSEINPUT { mouseData = unchecked((uint)(notches * 120)), dwFlags = MOUSEEVENTF_WHEEL } };
+            SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>());
+        }
+
         public static void ApplyDarkMode(Window window)
         {
             window.SourceInitialized += (s, e) =>

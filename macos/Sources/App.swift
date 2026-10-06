@@ -248,150 +248,412 @@ final class ImageExportHelper {
 }
 
 // --- Скролл-скриншоты ---
-final class ScrollStitcher {
-    static func stitch(frames: [NSImage]) -> NSImage? {
-        guard !frames.isEmpty else { return nil }
-        if frames.count == 1 { return frames[0] }
 
-        var cgFrames: [CGImage] = []
-        for f in frames {
-            if let tiff = f.tiffRepresentation,
-               let source = CGImageSourceCreateWithData(tiff as CFData, nil),
-               let cg = CGImageSourceCreateImageAtIndex(source, 0, nil) {
-                cgFrames.append(cg)
-            }
+/// Склейка скролл-кадров.
+/// 1) Закреплённые шапка/подвал (строки, не изменившиеся между кадрами на тех же местах) отсекаются —
+///    шапка берётся один раз из первого кадра, подвал один раз из последнего. Раньше они повторялись на каждом стыке.
+/// 2) Сдвиг ищется по сигнатурам строк (64 усреднённых столбца, без полосы прокрутки) и только по «информативным»
+///    строкам — пустые строки текстовых страниц совпадают с чем угодно и сбивали прежний поиск.
+/// 3) Новые строки копируются из кадров байт-в-байт, без пересэмплирования.
+final class ScrollStitchEngine {
+    enum AddResult { case first, identical, noMatch, appended(Int) }
+
+    private(set) var width = 0, height = 0
+    private(set) var frameCount = 0
+    private var colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    private var prevPixels: [UInt8] = []
+    private var prevSig: [Float] = []
+    private var out: [UInt8] = []
+    private(set) var outRows = 0
+    private var lastBottom = 0
+    private static let bins = 64
+
+    /// Высота результата, если закончить сейчас
+    var resultHeight: Int { frameCount <= 1 ? height : outRows + lastBottom }
+
+    /// requireMatch: в авто-режиме кадр без надёжного совпадения не добавляется (лучше пропуск, чем дубль)
+    func add(_ img: CGImage, expectedDy: Int?, requireMatch: Bool) -> AddResult {
+        if frameCount == 0 {
+            if let cs = img.colorSpace, cs.supportsOutput { colorSpace = cs }
+            guard let px = Self.pixels(img, colorSpace) else { return .noMatch }
+            width = img.width; height = img.height
+            prevPixels = px; prevSig = signatures(px)
+            frameCount = 1
+            return .first
         }
-        guard !cgFrames.isEmpty else { return nil }
+        guard img.width == width, img.height == height, let px = Self.pixels(img, colorSpace) else { return .noMatch }
+        let sig = signatures(px)
+        if isIdentical(prevSig, sig) { return .identical }
 
-        let width = cgFrames[0].width
-        var stitchedCG = cgFrames[0]
+        let top = staticTop(prevSig, sig)
+        let bot = staticBottom(prevSig, sig, top: top)
+        let region = height - top - bot
+        guard region > 16 else { return .identical }
 
-        for i in 1..<cgFrames.count {
-            let nextCG = cgFrames[i]
-            let overlap = findVerticalOverlap(top: stitchedCG, bottom: nextCG)
-            stitchedCG = combineImages(top: stitchedCG, bottom: nextCG, overlap: overlap, width: width)
+        var dy = findOffset(prevSig, sig, top: top, bottom: bot, expected: expectedDy)
+        if dy == nil {
+            if requireMatch { return .noMatch }
+            dy = region      // ручной режим, прокрутили дальше, чем на экран: стыкуем без нахлёста
         }
+        let d = min(dy!, region)
 
-        let scale = frames[0].pixelScale
-        let ptSize = NSSize(width: CGFloat(stitchedCG.width) / scale, height: CGFloat(stitchedCG.height) / scale)
-        return NSImage(cgImage: stitchedCG, size: ptSize)
+        if frameCount == 1 { appendRows(prevPixels, from: 0, to: height - bot) }   // шапка + первый экран, без подвала
+        appendRows(px, from: height - bot - d, to: height - bot)                   // только новые строки
+        prevPixels = px; prevSig = sig; lastBottom = bot
+        frameCount += 1
+        return .appended(d)
     }
 
-    private static func findVerticalOverlap(top: CGImage, bottom: CGImage) -> Int {
-        let maxSearch = min(top.height / 2, bottom.height / 2, 600)
-        guard maxSearch > 20 else { return 0 }
+    func finish() -> CGImage? {
+        guard frameCount > 0 else { return nil }
+        if frameCount == 1 { return Self.makeImage(prevPixels, width: width, height: height, colorSpace) }
+        var final = out
+        let rowBytes = width * 4
+        if lastBottom > 0 {   // подвал — один раз, из последнего кадра
+            final.append(contentsOf: prevPixels[((height - lastBottom) * rowBytes)..<(height * rowBytes)])
+        }
+        return Self.makeImage(final, width: width, height: outRows + lastBottom, colorSpace)
+    }
 
-        guard let topData = top.dataProvider?.data, let topPtr = CFDataGetBytePtr(topData),
-              let botData = bottom.dataProvider?.data, let botPtr = CFDataGetBytePtr(botData) else { return 0 }
-
-        let topBPR = top.bytesPerRow
-        let botBPR = bottom.bytesPerRow
-        let checkWidth = min(top.width, bottom.width)
-
-        var bestOverlap = 0
-        var minDiff = Int.max
-
-        for overlap in stride(from: 20, to: maxSearch, by: 2) {
-            var diff = 0
-            let sampleRows = min(15, overlap)
-            for r in 0..<sampleRows {
-                let topY = top.height - overlap + r
-                let botY = r
-                let topRowOffset = topY * topBPR
-                let botRowOffset = botY * botBPR
-
-                for x in stride(from: 0, to: checkWidth, by: 4) {
-                    let p1 = topPtr[topRowOffset + x * 4]
-                    let p2 = botPtr[botRowOffset + x * 4]
-                    diff += abs(Int(p1) - Int(p2))
+    /// Быстрая проверка «картинка успокоилась» (плавная прокрутка, подгрузка)
+    static func roughlyEqual(_ a: CGImage, _ b: CGImage) -> Bool {
+        guard a.width == b.width, a.height == b.height else { return false }
+        let w = 48, h = max(8, min(256, a.height * 48 / max(1, a.width)))
+        func thumb(_ i: CGImage) -> [UInt8] {
+            var buf = [UInt8](repeating: 0, count: w * h)
+            buf.withUnsafeMutableBytes { p in
+                if let ctx = CGContext(data: p.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                       space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) {
+                    ctx.interpolationQuality = .low
+                    ctx.draw(i, in: CGRect(x: 0, y: 0, width: w, height: h))
                 }
             }
-            if diff < minDiff {
-                minDiff = diff
-                bestOverlap = overlap
-            }
+            return buf
         }
-
-        if minDiff < (checkWidth / 4) * 15 * 18 { return bestOverlap }
-        return 0
+        let ta = thumb(a), tb = thumb(b)
+        var diff = 0
+        for k in 0..<ta.count { diff += abs(Int(ta[k]) - Int(tb[k])) }
+        return Double(diff) / Double(ta.count) < 0.6
     }
 
-    private static func combineImages(top: CGImage, bottom: CGImage, overlap: Int, width: Int) -> CGImage {
-        let newHeight = top.height + bottom.height - overlap
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(data: nil, width: width, height: newHeight, bitsPerComponent: 8, bytesPerRow: width * 4, space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-            return top
+    // MARK: - Внутреннее
+
+    private func appendRows(_ px: [UInt8], from y0: Int, to y1: Int) {
+        guard y1 > y0 else { return }
+        let rowBytes = width * 4
+        out.append(contentsOf: px[(y0 * rowBytes)..<(y1 * rowBytes)])
+        outRows += y1 - y0
+    }
+
+    /// Сигнатура строки: 64 средних яркости по столбцам; поля по 2% слева и 3% справа (полоса прокрутки) не учитываются
+    private func signatures(_ px: [UInt8]) -> [Float] {
+        let B = Self.bins
+        var sig = [Float](repeating: 0, count: height * B)
+        let x0 = width * 2 / 100, x1 = max(x0 + B, width - max(width * 3 / 100, 12))
+        let span = x1 - x0
+        px.withUnsafeBufferPointer { (p: UnsafeBufferPointer<UInt8>) -> Void in
+            sig.withUnsafeMutableBufferPointer { (s: inout UnsafeMutableBufferPointer<Float>) -> Void in
+                for y in 0..<height {
+                    let row = y * width * 4
+                    for b in 0..<B {
+                        let a = x0 + span * b / B, e = x0 + span * (b + 1) / B
+                        var sum = 0, n = 0
+                        var x = a
+                        while x < e {
+                            let i = row + x * 4
+                            sum += (Int(p[i]) * 29 + Int(p[i + 1]) * 150 + Int(p[i + 2]) * 77) >> 8   // BGRA → Y
+                            n += 1; x += 2
+                        }
+                        s[y * B + b] = n > 0 ? Float(sum) / Float(n) : 0
+                    }
+                }
+            }
         }
+        return sig
+    }
 
-        let topRect = CGRect(x: 0, y: bottom.height - overlap, width: width, height: top.height)
-        ctx.draw(top, in: topRect)
+    @inline(__always) private func rowDiff(_ a: UnsafeBufferPointer<Float>, _ ya: Int, _ b: UnsafeBufferPointer<Float>, _ yb: Int) -> Float {
+        let B = Self.bins
+        var d: Float = 0
+        let ia = ya * B, ib = yb * B
+        for k in 0..<B { d += abs(a[ia + k] - b[ib + k]) }
+        return d / Float(B)
+    }
 
-        let botRect = CGRect(x: 0, y: 0, width: width, height: bottom.height)
-        ctx.draw(bottom, in: botRect)
+    private func isIdentical(_ a: [Float], _ b: [Float]) -> Bool {
+        a.withUnsafeBufferPointer { pa -> Bool in b.withUnsafeBufferPointer { pb -> Bool in
+            for y in stride(from: 0, to: height, by: 2) where rowDiff(pa, y, pb, y) > 0.6 { return false }
+            return true
+        } }
+    }
 
-        return ctx.makeImage() ?? top
+    private func staticTop(_ a: [Float], _ b: [Float]) -> Int {
+        a.withUnsafeBufferPointer { pa -> Int in b.withUnsafeBufferPointer { pb -> Int in
+            var y = 0
+            while y < height / 3 && rowDiff(pa, y, pb, y) < 0.8 { y += 1 }
+            return y
+        } }
+    }
+
+    private func staticBottom(_ a: [Float], _ b: [Float], top: Int) -> Int {
+        a.withUnsafeBufferPointer { pa -> Int in b.withUnsafeBufferPointer { pb -> Int in
+            var n = 0
+            while n < height / 3 && height - 1 - n > top && rowDiff(pa, height - 1 - n, pb, height - 1 - n) < 0.8 { n += 1 }
+            return n
+        } }
+    }
+
+    /// Сдвиг dy: строка y нового кадра == строка y+dy прошлого (контент уехал вверх на dy)
+    private func findOffset(_ prev: [Float], _ cur: [Float], top: Int, bottom: Int, expected: Int?) -> Int? {
+        let n = height - top - bottom
+        let B = Self.bins
+        let minOverlap = max(24, n / 10)
+        guard n - minOverlap >= 1 else { return nil }
+        return prev.withUnsafeBufferPointer { pp -> Int? in cur.withUnsafeBufferPointer { pc -> Int? in
+            // Информативные строки нового кадра (есть перепад яркости) — пустые совпадают с чем угодно
+            var info: [Int] = []
+            for k in 0..<n {
+                let base = (top + k) * B
+                var lo: Float = 255, hi: Float = 0
+                for b in 0..<B { let v = pc[base + b]; lo = min(lo, v); hi = max(hi, v) }
+                if hi - lo > 10 { info.append(k) }
+            }
+            if info.count < 12 { info = Array(stride(from: 0, to: n, by: 2)) }
+
+            var bestDy = -1
+            var bestCost = Float.greatestFiniteMagnitude
+            var valid = info.count            // нахлёст с ростом dy только уменьшается
+            for dy in 1...(n - minOverlap) {
+                let m = n - dy
+                // до 140 строк, равномерно по тем, что попадают в нахлёст
+                while valid > 0 && info[valid - 1] >= m { valid -= 1 }
+                guard valid >= 8 else { continue }
+                let step = max(1, valid / 140)
+                let samples = (valid + step - 1) / step
+                let limit = bestCost * Float(samples)
+                var sum: Float = 0
+                var i = 0
+                while i < valid {
+                    let k = info[i]
+                    sum += rowDiff(pp, top + dy + k, pc, top + k)
+                    if sum > limit { break }
+                    i += step
+                }
+                if sum > limit { continue }
+                var cost = sum / Float(samples)
+                if let e = expected { cost += Float(abs(dy - e)) * 0.0015 }   // при равенстве — ближе к ожидаемому шагу
+                if cost < bestCost { bestCost = cost; bestDy = dy }
+            }
+            return (bestDy > 0 && bestCost < 4.0) ? bestDy : nil
+        } }
+    }
+
+    private static func pixels(_ img: CGImage, _ cs: CGColorSpace) -> [UInt8]? {
+        let w = img.width, h = img.height
+        var buf = [UInt8](repeating: 0, count: w * h * 4)
+        let ok = buf.withUnsafeMutableBytes { p -> Bool in
+            guard let ctx = CGContext(data: p.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: cs,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return false }
+            ctx.interpolationQuality = .none
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return ok ? buf : nil
+    }
+
+    private static func makeImage(_ px: [UInt8], width: Int, height: Int, _ cs: CGColorSpace) -> CGImage? {
+        guard height > 0, let provider = CGDataProvider(data: Data(px) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4, space: cs,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
     }
 }
 
-// --- Менеджер скролл-скриншотов ---
+/// Синтетическая прокрутка колесом в точке (Quartz-глобальные координаты). Нужен «Универсальный доступ».
+enum ScrollInput {
+    static func scroll(points: CGFloat, direction: Int32, at p: CGPoint) {
+        CGWarpMouseCursorPosition(p)     // колесо получает окно под курсором
+        var left = Int(points)
+        while left > 0 {
+            let step = min(left, 60)
+            if let ev = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(step) * direction, wheel2: 0, wheel3: 0) {
+                ev.location = p
+                ev.post(tap: .cghidEventTap)
+            }
+            left -= step
+            usleep(4000)
+        }
+    }
+}
+
+@MainActor
+final class ScrollPanelModel: ObservableObject {
+    @Published var frames = 0
+    @Published var heightPx = 0
+    @Published var running = false
+    @Published var canAuto = false
+}
+
+// --- Менеджер скролл-скриншотов: авто-прокрутка с склейкой, ручной «+ Кадр» как запасной путь ---
 @MainActor
 final class ScrollCaptureManager {
     static let shared = ScrollCaptureManager()
     private var panelWindow: NSWindow?
     private var targetQuartzRect: CGRect = .zero
-    private var capturedFrames: [NSImage] = []
+    private var scale: CGFloat = 2
+    private var engine = ScrollStitchEngine()
     private var onFinished: ((NSImage) -> Void)?
     private var session = 0              // поздний ответ захвата от отменённой сессии не должен попасть в новую
-    private var pendingCaptures = 0
+    private var busy = false
     private var finishRequested = false
+    private var autoTask: Task<Void, Never>?
+    private var escMonitors: [Any] = []
+    private let model = ScrollPanelModel()
 
     var isActive: Bool { panelWindow != nil }
 
     func startScrollingSession(quartzRect: CGRect, onComplete: @escaping (NSImage) -> Void) {
         cancelSession()
-        self.targetQuartzRect = quartzRect
-        self.capturedFrames.removeAll()
-        self.onFinished = onComplete
-
-        captureCurrentFrame()
+        session += 1
+        targetQuartzRect = quartzRect
+        scale = Coord.screen(for: Coord.toAppKit(quartzRect)).backingScaleFactor
+        engine = ScrollStitchEngine()
+        onFinished = onComplete
+        model.frames = 0; model.heightPx = 0; model.running = false
+        model.canAuto = AXIsProcessTrusted()
         showControlPanel()
+        installEscMonitor()
+        if model.canAuto { startAuto() } else { captureCurrentFrame() }
     }
 
+    /// Ручной кадр
     func captureCurrentFrame() {
+        guard !busy, autoTask == nil else { return }
+        busy = true
         let token = session
-        pendingCaptures += 1
-        CaptureEngine.shared.capture(quartzRect: targetQuartzRect) { [weak self] img in
-            guard let self = self, token == self.session else { return }
-            self.pendingCaptures -= 1
+        Task { @MainActor in
+            let img = await CaptureEngine.shared.captureCG(quartzRect: self.targetQuartzRect)
+            guard token == self.session else { return }
+            self.busy = false
             if let img = img {
-                self.capturedFrames.append(img)
-                self.updatePanel()
+                _ = self.engine.add(img, expectedDy: nil, requireMatch: false)
+                playShutterSound()
+                self.updateModel()
             }
-            if self.finishRequested && self.pendingCaptures == 0 { self.finishSession() }
+            if self.finishRequested { self.finishSession() }
         }
+    }
+
+    /// Авто: крутим на ~60% высоты, ждём, пока картинка успокоится, клеим; конец страницы — два кадра без движения
+    func startAuto() {
+        guard autoTask == nil, !busy else { return }
+        let token = session
+        model.running = true
+        autoTask = Task { @MainActor in
+            let rect = self.targetQuartzRect
+            let center = CGPoint(x: rect.midX, y: rect.midY)
+            let step = max(40, rect.height * 0.6)
+            var direction: Int32 = -1
+            var directionChecked = self.engine.frameCount > 1
+
+            if self.engine.frameCount == 0 {
+                guard let first = await self.captureSettled(token) else { return }
+                guard token == self.session else { return }
+                _ = self.engine.add(first, expectedDy: nil, requireMatch: true)
+                self.updateModel()
+            }
+            var still = 0
+            while token == self.session, !Task.isCancelled, self.engine.frameCount < 200, self.engine.resultHeight < 60000 {
+                ScrollInput.scroll(points: step, direction: direction, at: center)
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                guard let img = await self.captureSettled(token), token == self.session, !Task.isCancelled else { return }
+                let r = self.engine.add(img, expectedDy: Int(step * self.scale), requireMatch: true)
+                switch r {
+                case .appended:
+                    directionChecked = true
+                    still = 0
+                case .identical, .noMatch, .first:
+                    if !directionChecked {
+                        // Первый шаг ничего не дал — возможно, инвертировано направление: пробуем в другую сторону
+                        directionChecked = true
+                        direction = -direction
+                        if case .noMatch = r { ScrollInput.scroll(points: step, direction: direction, at: center) }   // вернуть сдвиг
+                        continue
+                    }
+                    still += 1
+                }
+                self.updateModel()
+                if still >= 2 { break }
+            }
+            guard token == self.session else { return }
+            self.autoTask = nil
+            self.model.running = false
+            if !Task.isCancelled { self.finishSession() }
+        }
+    }
+
+    private func captureSettled(_ token: Int) async -> CGImage? {
+        var last = await CaptureEngine.shared.captureCG(quartzRect: targetQuartzRect)
+        for _ in 0..<6 {
+            guard token == session, let l = last else { return last }
+            try? await Task.sleep(nanoseconds: 90_000_000)
+            guard let next = await CaptureEngine.shared.captureCG(quartzRect: targetQuartzRect) else { return l }
+            if ScrollStitchEngine.roughlyEqual(l, next) { return next }
+            last = next
+        }
+        return last
+    }
+
+    private func updateModel() {
+        model.frames = engine.frameCount
+        model.heightPx = engine.resultHeight
+        model.canAuto = AXIsProcessTrusted()
     }
 
     func finishSession() {
-        // «Готово» нажали, пока последний кадр ещё снимается — дождаться его
-        if pendingCaptures > 0 { finishRequested = true; return }
+        if busy && autoTask == nil { finishRequested = true; return }   // ручной кадр ещё снимается — дождаться
         finishRequested = false
+        autoTask?.cancel(); autoTask = nil
+        removeEscMonitor()
         closePanel()
-        let frames = capturedFrames
-        capturedFrames.removeAll()
         session += 1
-        if let stitched = ScrollStitcher.stitch(frames: frames) {
-            onFinished?(stitched)
-        } else if let first = frames.first {
-            onFinished?(first)
-        }
+        busy = false
+        model.running = false
+        guard let cg = engine.finish() else { return }
+        engine = ScrollStitchEngine()
+        playShutterSound()
+        onFinished?(NSImage(cgImage: cg, size: NSSize(width: CGFloat(cg.width) / scale, height: CGFloat(cg.height) / scale)))
     }
 
     func cancelSession() {
+        autoTask?.cancel(); autoTask = nil
+        removeEscMonitor()
         closePanel()
-        capturedFrames.removeAll()
+        engine = ScrollStitchEngine()
         session += 1
-        pendingCaptures = 0
+        busy = false
         finishRequested = false
+        model.running = false
+    }
+
+    private func openAccessibilitySettings() {
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(opts)   // добавляет QScreen в список
+        if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(u) }
+    }
+
+    private func installEscMonitor() {
+        removeEscMonitor()
+        let handler: (NSEvent) -> Void = { [weak self] e in
+            if e.keyCode == 53 { Task { @MainActor in self?.finishSession() } }
+        }
+        if let g = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler) { escMonitors.append(g) }
+        if let l = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { e in handler(e); return e }) { escMonitors.append(l) }
+    }
+
+    private func removeEscMonitor() {
+        for m in escMonitors { NSEvent.removeMonitor(m) }
+        escMonitors.removeAll()
     }
 
     private func showControlPanel() {
@@ -399,37 +661,31 @@ final class ScrollCaptureManager {
         let targetAK = Coord.toAppKit(targetQuartzRect)
         let screen = Coord.screen(for: targetAK)
 
-        let panelW: CGFloat = 280
-        let panelH: CGFloat = 110
-        let posX = min(screen.visibleFrame.maxX - panelW - 20, max(screen.visibleFrame.minX + 20, targetAK.maxX + 15))
+        let panelW: CGFloat = 300
+        let panelH: CGFloat = 124
+        // Панель — сбоку от области, чтобы не попасть под курсор прокрутки и в кадр
+        var posX = targetAK.maxX + 15
+        if posX + panelW > screen.visibleFrame.maxX - 10 { posX = targetAK.minX - panelW - 15 }
+        posX = min(screen.visibleFrame.maxX - panelW - 10, max(screen.visibleFrame.minX + 10, posX))
         let posY = max(screen.visibleFrame.minY + 20, min(screen.visibleFrame.maxY - panelH - 20, targetAK.midY))
 
-        let win = NSWindow(contentRect: NSRect(x: posX, y: posY, width: panelW, height: panelH),
-                           styleMask: [.titled, .closable, .nonactivatingPanel],
-                           backing: .buffered, defer: false)
+        let win = NSPanel(contentRect: NSRect(x: posX, y: posY, width: panelW, height: panelH),
+                          styleMask: [.titled, .closable, .nonactivatingPanel],
+                          backing: .buffered, defer: false)
         win.title = "Скролл-скриншот"
         win.level = .floating
         win.isReleasedWhenClosed = false
         win.backgroundColor = NSColor(red: 0.12, green: 0.13, blue: 0.15, alpha: 1.0)
-
         win.contentView = NSHostingView(rootView: ScrollControlPanelView(
-            frameCount: capturedFrames.count,
+            model: model,
+            onAuto: { [weak self] in self?.startAuto() },
             onAddFrame: { [weak self] in self?.captureCurrentFrame() },
             onFinish: { [weak self] in self?.finishSession() },
-            onCancel: { [weak self] in self?.cancelSession(); AppDelegate.shared?.restoreSuspendedEditor() }
+            onCancel: { [weak self] in self?.cancelSession(); AppDelegate.shared?.restoreSuspendedEditor() },
+            onAccess: { [weak self] in self?.openAccessibilitySettings() }
         ))
-
-        win.makeKeyAndOrderFront(nil)
+        win.orderFrontRegardless()
         self.panelWindow = win
-    }
-
-    private func updatePanel() {
-        panelWindow?.contentView = NSHostingView(rootView: ScrollControlPanelView(
-            frameCount: capturedFrames.count,
-            onAddFrame: { [weak self] in self?.captureCurrentFrame() },
-            onFinish: { [weak self] in self?.finishSession() },
-            onCancel: { [weak self] in self?.cancelSession(); AppDelegate.shared?.restoreSuspendedEditor() }
-        ))
     }
 
     private func closePanel() {
@@ -439,57 +695,51 @@ final class ScrollCaptureManager {
 }
 
 struct ScrollControlPanelView: View {
-    var frameCount: Int
+    @ObservedObject var model: ScrollPanelModel
+    var onAuto: () -> Void
     var onAddFrame: () -> Void
     var onFinish: () -> Void
     var onCancel: () -> Void
+    var onAccess: () -> Void
+
+    private func pill(_ title: String, _ icon: String, _ color: Color, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) { Image(systemName: icon); Text(title) }
+                .font(.system(size: 11, weight: .bold))
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .background(color).foregroundColor(.white).cornerRadius(5)
+        }
+    }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Circle().fill(Color.green).frame(width: 8, height: 8)
-                Text("Кадров добавлено: \(frameCount)")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(.white)
+                Circle().fill(model.running ? Color.red : Color.green).frame(width: 8, height: 8)
+                Text(model.running ? "Авто-прокрутка…" : "Кадров: \(model.frames)")
+                    .font(.system(size: 12, weight: .bold)).foregroundColor(.white)
                 Spacer()
+                Text("\(model.heightPx) px").font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundColor(.gray)
             }
 
-            Text("Прокрутите страницу вниз и нажмите «+ Кадр»")
-                .font(.system(size: 10))
-                .foregroundColor(.gray)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(model.running
+                 ? "Прокручиваю и склеиваю сам. Esc или «Стоп» — закончить здесь."
+                 : (model.canAuto ? "«Авто» — прокрутить до конца самому, или вручную: прокрутите и «+ Кадр»."
+                                  : "Для авто-прокрутки разрешите QScreen «Универсальный доступ». Пока — вручную: прокрутите и «+ Кадр»."))
+                .font(.system(size: 10)).foregroundColor(.gray)
+                .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 8) {
-                Button(action: onAddFrame) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "plus.viewfinder")
-                        Text("+ Кадр")
-                    }
-                    .font(.system(size: 11, weight: .bold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(5)
+            HStack(spacing: 6) {
+                if model.running {
+                    pill("Стоп", "stop.fill", .red, onFinish)
+                } else {
+                    if model.canAuto { pill("Авто", "play.fill", .purple, onAuto) }
+                    pill("Кадр", "plus.viewfinder", .blue, onAddFrame)
+                    pill("Готово", "checkmark", .green, onFinish)
+                    if !model.canAuto { pill("Доступ…", "hand.raised", Color.white.opacity(0.18), onAccess) }
                 }
-
-                Button(action: onFinish) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "checkmark")
-                        Text("Готово")
-                    }
-                    .font(.system(size: 11, weight: .bold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.green)
-                    .foregroundColor(.white)
-                    .cornerRadius(5)
-                }
-
+                Spacer()
                 Button("Отмена", action: onCancel)
-                    .font(.system(size: 11))
-                    .foregroundColor(.gray)
-                    .padding(.horizontal, 6)
+                    .font(.system(size: 11)).foregroundColor(.gray)
             }
             .buttonStyle(.plain)
         }
@@ -658,6 +908,13 @@ final class CaptureEngine {
         return NSImage(cgImage: cg, size: rectQ.size)
     }
 
+    /// Кадр области без звука затвора — для скролл-захвата
+    func captureCG(quartzRect: CGRect) async -> CGImage? {
+        let scale = Coord.screen(for: Coord.toAppKit(quartzRect)).backingScaleFactor
+        let keep = AppDelegate.shared?.pinnedWindowIDs ?? []
+        return await Self.captureRect(quartzRect, scale: scale, keepWindowIDs: keep)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+    }
+
     /// Экран под курсором целиком
     func captureFullScreen(completion: @escaping (NSImage?) -> Void) {
         let screen = Coord.screen(containing: NSEvent.mouseLocation)
@@ -745,18 +1002,51 @@ final class CaptureEngine {
 }
 
 final class OCREngine {
+    /// Vision по умолчанию распознаёт только английский — включаем русский.
+    /// Длинный скролл-скрин целиком Vision ужимает до нечитаемого — режем на полосы с нахлёстом и убираем повторы на стыках.
     static func extractText(from image: NSImage) -> String {
-        guard let tiffData = image.tiffRepresentation,
-              let ciImage = CIImage(data: tiffData) else { return "" }
-        let handler = VNImageRequestHandler(ciImage: ciImage, options: [:])
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return "" }
+        let tileH = 2400, overlap = 160
+        if cg.height <= tileH + overlap { return recognize(cg).map { $0.text }.joined(separator: "\n") }
+
+        var lines: [String] = []
+        var y = 0
+        while y < cg.height {
+            let h = min(tileH + overlap, cg.height - y)
+            guard let tile = cg.cropping(to: CGRect(x: 0, y: y, width: cg.width, height: h)) else { break }
+            for l in recognize(tile) {
+                let t = l.text.trimmingCharacters(in: .whitespaces)
+                // строки из зоны нахлёста уже могли попасть из прошлой полосы
+                if y > 0 && l.topPx < Double(overlap) + 8 && lines.suffix(12).contains(t) { continue }
+                lines.append(t)
+            }
+            if y + h >= cg.height { break }
+            y += tileH
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func recognize(_ cg: CGImage) -> [(text: String, topPx: Double)] {
+        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
+        let wanted = ["ru-RU", "en-US"]
+        if let supported = try? request.supportedRecognitionLanguages() {
+            let langs = wanted.filter { supported.contains($0) }
+            if !langs.isEmpty { request.recognitionLanguages = langs }
+        }
+        if #available(macOS 13.0, *) { request.automaticallyDetectsLanguage = true }
         do {
             try handler.perform([request])
-            guard let observations = request.results else { return "" }
-            return observations.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
-        } catch { return "" }
+            let obs = (request.results ?? []).sorted {
+                abs($0.boundingBox.midY - $1.boundingBox.midY) > 0.005 ? $0.boundingBox.midY > $1.boundingBox.midY : $0.boundingBox.minX < $1.boundingBox.minX
+            }
+            return obs.compactMap { o in
+                guard let s = o.topCandidates(1).first?.string else { return nil }
+                return (s, Double(1 - o.boundingBox.maxY) * Double(cg.height))
+            }
+        } catch { return [] }
     }
 }
 
@@ -2342,7 +2632,14 @@ struct CaptureEditorView: View {
             Image(nsImage: currentImage)
                 .resizable()
                 .frame(width: currentImage.size.width, height: currentImage.size.height)
+            annotationsLayer
+        }
+        .frame(width: currentImage.size.width, height: currentImage.size.height)
+    }
 
+    /// Всё, что нарисовано поверх скрина (цензура, фигуры, текст) — без самой картинки
+    var annotationsLayer: some View {
+        ZStack(alignment: .topLeading) {
             ForEach(items.compactMap { item -> (UUID, CGRect)? in
                 if case .shape(let s) = item, s.tool == .blur, s.points.count >= 2 {
                     return (s.id, CGRect(x: min(s.points[0].x, s.points[1].x), y: min(s.points[0].y, s.points[1].y), width: abs(s.points[0].x - s.points[1].x), height: abs(s.points[0].y - s.points[1].y)))
@@ -2533,6 +2830,9 @@ struct CaptureEditorView: View {
             ZStack {
                 Color(red: 0.08, green: 0.09, blue: 0.10)
 
+                // Длинный скролл-скрин не влезает в экран — холст прокручивается
+                GeometryReader { geo in
+                ScrollView([.horizontal, .vertical]) {
                 ZStack(alignment: .topLeading) {
                     // Жест только на холсте: кнопки обрезки и поле текста поверх него остаются нажимаемыми
                     fullRenderView
@@ -2621,13 +2921,16 @@ struct CaptureEditorView: View {
                             .focused($isTextFocused).onSubmit { commitActiveText() }
                     }
                 }
+                .frame(minWidth: geo.size.width, minHeight: geo.size.height)
+                }
+                }
 
                 if let toast = toastMessage {
                     Text(toast).font(.system(size: 13, weight: .semibold)).foregroundColor(.white).padding(.horizontal, 14).padding(.vertical, 8).background(Color.black.opacity(0.85)).cornerRadius(8).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(.bottom, 20)
                 }
             }
         }
-        .frame(minWidth: 800, minHeight: 46 + currentImage.size.height + (isBeautifyEnabled ? 72 : 0))
+        .frame(minWidth: 800, minHeight: min(46 + currentImage.size.height + (isBeautifyEnabled ? 72 : 0), (NSScreen.main?.visibleFrame.height ?? 900) - 60))
     }
 
     private func showToast(_ text: String) {
@@ -2641,11 +2944,8 @@ struct CaptureEditorView: View {
     /// CGImage.cropping считает Y сверху — прежний переворот Y вырезал зеркальную по вертикали область.
     @MainActor
     private func applyCrop(_ rect: CGRect) {
-        commitActiveText()
-        let scale = currentImage.pixelScale
-        let renderer = ImageRenderer(content: innerCanvasContent)
-        renderer.scale = scale
-        guard let cg = renderer.cgImage else { return }
+        guard let flat = renderFlattened(), let cg = flat.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        let scale = CGFloat(cg.width) / max(1, currentImage.size.width)
         let px = CGRect(x: rect.minX * scale, y: rect.minY * scale, width: rect.width * scale, height: rect.height * scale)
             .integral.intersection(CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
         guard px.width >= 2, px.height >= 2, let cropped = cg.cropping(to: px) else { return }
@@ -2658,7 +2958,7 @@ struct CaptureEditorView: View {
     }
 
     private func runOCR() {
-        if let finalImg = renderFinalImage() {
+        if let finalImg = renderFlattened() {
             let recognized = OCREngine.extractText(from: finalImg)
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(recognized, forType: .string)
@@ -2768,12 +3068,49 @@ struct CaptureEditorView: View {
     @MainActor
     private func renderFinalImage() -> NSImage? {
         commitActiveText()
+        guard isBeautifyEnabled else { return renderFlattened() }
+        // Beautify: картинка в рамке с тенью на градиенте — через ImageRenderer
         let renderer = ImageRenderer(content: fullRenderView)
         renderer.scale = currentImage.pixelScale
-        if let img = renderer.nsImage {
-            return img
+        return renderer.nsImage ?? currentImage
+    }
+
+    /// Скрин с аннотациями в полном разрешении, без фона Beautify.
+    /// ImageRenderer упирается в предельный размер текстуры (~16К px) и молча уменьшает масштаб — длинный скролл-скрин
+    /// сохранялся «пикселями», хотя в окне выглядел нормально. Поэтому исходник рисуется в CGContext напрямую,
+    /// а слой аннотаций — поверх, полосами по 4096 px. Без аннотаций отдаём исходник как есть.
+    @MainActor
+    private func renderFlattened() -> NSImage? {
+        commitActiveText()
+        if items.isEmpty && currentShape == nil { return currentImage }
+        guard let base = currentImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return currentImage }
+        let size = currentImage.size
+        let scale = CGFloat(base.width) / max(1, size.width)
+        let W = base.width, H = base.height
+        let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0, space: base.colorSpace ?? srgb, bitmapInfo: info)
+                     ?? CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0, space: srgb, bitmapInfo: info) else { return currentImage }
+        ctx.interpolationQuality = .none
+        ctx.draw(base, in: CGRect(x: 0, y: 0, width: W, height: H))
+
+        let tilePt = max(64, 4096 / scale)
+        var y: CGFloat = 0
+        while y < size.height {
+            let h = min(tilePt, size.height - y)
+            let tile = annotationsLayer
+                .offset(y: -y)
+                .frame(width: size.width, height: h, alignment: .topLeading)
+                .clipped()
+            let r = ImageRenderer(content: tile)
+            r.scale = scale
+            if let cg = r.cgImage {
+                ctx.draw(cg, in: CGRect(x: 0, y: CGFloat(H) - (y + h) * scale, width: size.width * scale, height: h * scale))
+            }
+            y += h
         }
-        return currentImage
+        guard let out = ctx.makeImage() else { return currentImage }
+        return NSImage(cgImage: out, size: size)
     }
 
     @MainActor
@@ -3283,7 +3620,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func openEditor(_ image: NSImage) {
         closeEditor()
-        let win = NSWindow(contentRect: NSRect(x: 100, y: 100, width: max(image.size.width + 40, 800), height: image.size.height + 60), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        let vf = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let win = NSWindow(contentRect: NSRect(x: 100, y: 100, width: min(max(image.size.width + 40, 800), vf.width - 40), height: min(image.size.height + 60, vf.height - 40)), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         win.minSize = NSSize(width: 800, height: 350)
         win.titlebarAppearsTransparent = true
         win.titleVisibility = .hidden

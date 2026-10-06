@@ -607,6 +607,20 @@ namespace QScreen
         public BitmapSource RenderFinalImage(bool ignoreBeautify = false)
         {
             CommitActiveText();
+            if (ignoreBeautify || !_beautify)
+            {
+                // Без Beautify — исходник 1:1, аннотации поверх. VisualBrush растеризуется через промежуточную текстуру
+                // ограниченного размера, и длинный скролл-скрин сохранялся «пикселями».
+                if (_items.Count == 0) return _image;
+                var flat = new RenderTargetBitmap(_image.PixelWidth, _image.PixelHeight, 96 * _scale, 96 * _scale, PixelFormats.Pbgra32);
+                var baseDv = new DrawingVisual();
+                RenderOptions.SetBitmapScalingMode(baseDv, BitmapScalingMode.NearestNeighbor);
+                using (var dc = baseDv.RenderOpen()) dc.DrawImage(_image, new Rect(0, 0, _logical.Width, _logical.Height));
+                flat.Render(baseDv);
+                flat.Render(_layer);   // слой аннотаций лежит в (0,0) холста — смещения нет
+                flat.Freeze();
+                return flat;
+            }
             _overlay.Visibility = Visibility.Collapsed;
             _renderRoot.UpdateLayout();
             FrameworkElement target = ignoreBeautify ? _inner : _renderRoot;

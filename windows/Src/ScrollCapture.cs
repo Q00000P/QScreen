@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -14,135 +15,418 @@ using HorizontalAlignment = System.Windows.HorizontalAlignment;
 
 namespace QScreen
 {
-    public static class ScrollStitcher
+    /// <summary>
+    /// Склейка скролл-кадров (порт мак-версии).
+    /// 1) Закреплённые шапка/подвал (строки, не изменившиеся между кадрами на тех же местах) отсекаются:
+    ///    шапка берётся один раз из первого кадра, подвал — из последнего. Раньше они повторялись на каждом стыке.
+    /// 2) Сдвиг ищется по сигнатурам строк (64 усреднённых столбца, без полосы прокрутки) и только по «информативным»
+    ///    строкам — пустые строки текстовых страниц совпадают с чем угодно и сбивали прежний поиск.
+    /// 3) Новые строки копируются из кадров байт-в-байт.
+    /// </summary>
+    public sealed class ScrollStitchEngine
     {
-        public static Bitmap? Stitch(List<Bitmap> frames)
-        {
-            if (frames.Count == 0) return null;
-            if (frames.Count == 1) return (Bitmap)frames[0].Clone();
+        public enum Result { First, Identical, NoMatch, Appended }
 
-            Bitmap stitched = (Bitmap)frames[0].Clone();
-            int width = stitched.Width;
-            for (int i = 1; i < frames.Count; i++)
+        private const int Bins = 64;
+        public int Width { get; private set; }
+        public int Height { get; private set; }
+        public int FrameCount { get; private set; }
+        public int LastDy { get; private set; }
+        private byte[] _prevPx = Array.Empty<byte>();
+        private float[] _prevSig = Array.Empty<float>();
+        private readonly List<byte[]> _strips = new();
+        private int _outRows;
+        private int _lastBottom;
+
+        public int ResultHeight => FrameCount <= 1 ? Height : _outRows + _lastBottom;
+
+        /// <param name="requireMatch">авто-режим: без надёжного совпадения кадр не добавляется (лучше пропуск, чем дубль)</param>
+        public Result Add(Bitmap frame, int? expectedDy, bool requireMatch)
+        {
+            var px = Pixels(frame);
+            if (FrameCount == 0)
             {
-                var next = frames[i];
-                int overlap = FindVerticalOverlap(stitched, next);
-                var combined = Combine(stitched, next, overlap, width);
-                stitched.Dispose();
-                stitched = combined;
+                Width = frame.Width; Height = frame.Height;
+                _prevPx = px; _prevSig = Signatures(px);
+                FrameCount = 1;
+                return Result.First;
             }
-            return stitched;
+            if (frame.Width != Width || frame.Height != Height) return Result.NoMatch;
+            var sig = Signatures(px);
+            if (IsIdentical(_prevSig, sig)) return Result.Identical;
+
+            int top = StaticTop(_prevSig, sig);
+            int bot = StaticBottom(_prevSig, sig, top);
+            int region = Height - top - bot;
+            if (region <= 16) return Result.Identical;
+
+            int? found = FindOffset(_prevSig, sig, top, bot, expectedDy);
+            if (found == null)
+            {
+                if (requireMatch) return Result.NoMatch;
+                found = region;   // ручной режим, прокрутили больше чем на экран — стык без нахлёста
+            }
+            int d = Math.Min(found.Value, region);
+
+            if (FrameCount == 1) AppendRows(_prevPx, 0, Height - bot);   // шапка + первый экран, без подвала
+            AppendRows(px, Height - bot - d, Height - bot);               // только новые строки
+            _prevPx = px; _prevSig = sig; _lastBottom = bot; LastDy = d;
+            FrameCount++;
+            return Result.Appended;
         }
 
-        private static unsafe int FindVerticalOverlap(Bitmap top, Bitmap bottom)
+        public Bitmap? Finish()
         {
-            int maxSearch = Math.Min(Math.Min(top.Height / 2, bottom.Height / 2), 600);
-            if (maxSearch <= 20) return 0;
-            int checkWidth = Math.Min(top.Width, bottom.Width);
-
-            var td = top.LockBits(new Rectangle(0, 0, top.Width, top.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-            var bd = bottom.LockBits(new Rectangle(0, 0, bottom.Width, bottom.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            if (FrameCount == 0) return null;
+            int rowBytes = Width * 4;
+            int h = FrameCount == 1 ? Height : _outRows + _lastBottom;
+            var bmp = new Bitmap(Width, h, PixelFormat.Format32bppArgb);
+            var data = bmp.LockBits(new Rectangle(0, 0, Width, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
             try
             {
-                byte* tp = (byte*)td.Scan0; byte* bp = (byte*)bd.Scan0;
-                int bestOverlap = 0; long minDiff = long.MaxValue;
-                for (int overlap = 20; overlap < maxSearch; overlap += 2)
+                int y = 0;
+                void Put(byte[] src, int offset, int rows)
                 {
-                    long diff = 0;
-                    int sampleRows = Math.Min(15, overlap);
-                    for (int r = 0; r < sampleRows; r++)
-                    {
-                        byte* trow = tp + (top.Height - overlap + r) * td.Stride;
-                        byte* brow = bp + r * bd.Stride;
-                        for (int x = 0; x < checkWidth; x += 4)
-                            diff += Math.Abs(trow[x * 4] - brow[x * 4]);
-                    }
-                    if (diff < minDiff) { minDiff = diff; bestOverlap = overlap; }
+                    for (int r = 0; r < rows; r++)
+                        System.Runtime.InteropServices.Marshal.Copy(src, offset + r * rowBytes, data.Scan0 + (y + r) * data.Stride, rowBytes);
+                    y += rows;
                 }
-                return minDiff < (long)(checkWidth / 4) * 15 * 18 ? bestOverlap : 0;
+                if (FrameCount == 1) Put(_prevPx, 0, Height);
+                else
+                {
+                    foreach (var s in _strips) Put(s, 0, s.Length / rowBytes);
+                    if (_lastBottom > 0) Put(_prevPx, (Height - _lastBottom) * rowBytes, _lastBottom);   // подвал — один раз
+                }
             }
-            finally { top.UnlockBits(td); bottom.UnlockBits(bd); }
+            finally { bmp.UnlockBits(data); }
+            return bmp;
         }
 
-        private static Bitmap Combine(Bitmap top, Bitmap bottom, int overlap, int width)
+        /// <summary>Картинка «успокоилась» (плавная прокрутка, подгрузка)</summary>
+        public static bool RoughlyEqual(Bitmap a, Bitmap b)
         {
-            int newH = top.Height + bottom.Height - overlap;
-            var res = new Bitmap(width, newH, PixelFormat.Format32bppArgb);
-            using var g = Graphics.FromImage(res);
-            g.DrawImageUnscaled(top, 0, 0);
-            g.DrawImageUnscaled(bottom, 0, top.Height - overlap);
-            return res;
+            if (a.Width != b.Width || a.Height != b.Height) return false;
+            const int w = 48;
+            int h = Math.Max(8, Math.Min(256, a.Height * w / Math.Max(1, a.Width)));
+            using var ta = new Bitmap(a, w, h);
+            using var tb = new Bitmap(b, w, h);
+            long diff = 0;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    var ca = ta.GetPixel(x, y); var cb = tb.GetPixel(x, y);
+                    diff += Math.Abs(ca.R - cb.R) + Math.Abs(ca.G - cb.G) + Math.Abs(ca.B - cb.B);
+                }
+            return diff / (double)(w * h * 3) < 0.6;
+        }
+
+        // ---------- внутреннее ----------
+
+        private void AppendRows(byte[] px, int y0, int y1)
+        {
+            if (y1 <= y0) return;
+            int rowBytes = Width * 4;
+            var strip = new byte[(y1 - y0) * rowBytes];
+            Buffer.BlockCopy(px, y0 * rowBytes, strip, 0, strip.Length);
+            _strips.Add(strip);
+            _outRows += y1 - y0;
+        }
+
+        private static byte[] Pixels(Bitmap bmp)
+        {
+            var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                int rowBytes = bmp.Width * 4;
+                var buf = new byte[rowBytes * bmp.Height];
+                for (int y = 0; y < bmp.Height; y++)
+                    System.Runtime.InteropServices.Marshal.Copy(data.Scan0 + y * data.Stride, buf, y * rowBytes, rowBytes);
+                return buf;
+            }
+            finally { bmp.UnlockBits(data); }
+        }
+
+        /// <summary>Сигнатура строки: 64 средних яркости; поля по 2% слева и 3% справа (полоса прокрутки) не учитываются</summary>
+        private float[] Signatures(byte[] px)
+        {
+            var sig = new float[Height * Bins];
+            int x0 = Width * 2 / 100, x1 = Math.Max(x0 + Bins, Width - Math.Max(Width * 3 / 100, 12));
+            int span = x1 - x0;
+            for (int y = 0; y < Height; y++)
+            {
+                int row = y * Width * 4;
+                for (int b = 0; b < Bins; b++)
+                {
+                    int a = x0 + span * b / Bins, e = x0 + span * (b + 1) / Bins;
+                    int sum = 0, n = 0;
+                    for (int x = a; x < e; x += 2)
+                    {
+                        int i = row + x * 4;
+                        sum += (px[i] * 29 + px[i + 1] * 150 + px[i + 2] * 77) >> 8;   // BGRA → Y
+                        n++;
+                    }
+                    sig[y * Bins + b] = n > 0 ? (float)sum / n : 0;
+                }
+            }
+            return sig;
+        }
+
+        private static float RowDiff(float[] a, int ya, float[] b, int yb)
+        {
+            float d = 0; int ia = ya * Bins, ib = yb * Bins;
+            for (int k = 0; k < Bins; k++) d += Math.Abs(a[ia + k] - b[ib + k]);
+            return d / Bins;
+        }
+
+        private bool IsIdentical(float[] a, float[] b)
+        {
+            for (int y = 0; y < Height; y += 2) if (RowDiff(a, y, b, y) > 0.6f) return false;
+            return true;
+        }
+
+        private int StaticTop(float[] a, float[] b)
+        {
+            int y = 0;
+            while (y < Height / 3 && RowDiff(a, y, b, y) < 0.8f) y++;
+            return y;
+        }
+
+        private int StaticBottom(float[] a, float[] b, int top)
+        {
+            int n = 0;
+            while (n < Height / 3 && Height - 1 - n > top && RowDiff(a, Height - 1 - n, b, Height - 1 - n) < 0.8f) n++;
+            return n;
+        }
+
+        /// <summary>Сдвиг dy: строка y нового кадра == строка y+dy прошлого (контент уехал вверх на dy)</summary>
+        private int? FindOffset(float[] prev, float[] cur, int top, int bottom, int? expected)
+        {
+            int n = Height - top - bottom;
+            int minOverlap = Math.Max(24, n / 10);
+            if (n - minOverlap < 1) return null;
+
+            var info = new List<int>();
+            for (int k = 0; k < n; k++)
+            {
+                int bs = (top + k) * Bins; float lo = 255, hi = 0;
+                for (int b = 0; b < Bins; b++) { float v = cur[bs + b]; if (v < lo) lo = v; if (v > hi) hi = v; }
+                if (hi - lo > 10) info.Add(k);
+            }
+            if (info.Count < 12) { info.Clear(); for (int k = 0; k < n; k += 2) info.Add(k); }
+
+            int bestDy = -1; float bestCost = float.MaxValue;
+            int valid = info.Count;
+            for (int dy = 1; dy <= n - minOverlap; dy++)
+            {
+                int m = n - dy;
+                while (valid > 0 && info[valid - 1] >= m) valid--;
+                if (valid < 8) continue;
+                int step = Math.Max(1, valid / 140);
+                int samples = (valid + step - 1) / step;
+                double limit = bestCost == float.MaxValue ? double.MaxValue : (double)bestCost * samples;
+                double sum = 0;
+                bool over = false;
+                for (int i = 0; i < valid; i += step)
+                {
+                    int k = info[i];
+                    sum += RowDiff(prev, top + dy + k, cur, top + k);
+                    if (sum > limit) { over = true; break; }
+                }
+                if (over) continue;
+                float cost = (float)(sum / samples);
+                if (expected.HasValue) cost += Math.Abs(dy - expected.Value) * 0.0015f;   // при равенстве — ближе к ожидаемому шагу
+                if (cost < bestCost) { bestCost = cost; bestDy = dy; }
+            }
+            return bestDy > 0 && bestCost < 4.0f ? bestDy : null;
         }
     }
 
+    /// <summary>Скролл-захват: авто-прокрутка колесом до конца страницы со склейкой; ручной «+ Кадр» как запасной путь.</summary>
     public static class ScrollCaptureManager
     {
         private static ScrollPanelWindow? _panel;
         private static Rectangle _target;
         private static double _scale = 1.0;
-        private static readonly List<Bitmap> _frames = new();
+        private static ScrollStitchEngine _engine = new();
         private static Action<BitmapSource>? _onFinished;
+        private static int _session;
+        private static bool _running;
 
         public static bool IsActive => _panel != null;
+        public static bool IsRunning => _running;
 
         public static void StartSession(Rectangle target, double scale, Action<BitmapSource> onComplete)
         {
             Cancel();
+            _session++;
             _target = target; _scale = scale; _onFinished = onComplete;
-            CaptureCurrentFrame();
+            _engine = new ScrollStitchEngine();
             _panel = new ScrollPanelWindow(target);
             _panel.Show();
-            _panel.SetCount(_frames.Count);
+            RunAuto();   // по умолчанию — сам
         }
 
+        /// <summary>Ручной кадр</summary>
         public static void CaptureCurrentFrame()
         {
-            var bmp = CaptureEngine.Capture(_target);
-            if (bmp != null) { _frames.Add(bmp); _panel?.SetCount(_frames.Count); }
+            if (_running) return;
+            using var bmp = CaptureEngine.Capture(_target);
+            if (bmp == null) return;
+            _engine.Add(bmp, null, requireMatch: false);
+            UpdatePanel();
         }
 
+        /// <summary>Авто: крутим на ~60% высоты, ждём, пока картинка успокоится, клеим; конец — два шага без движения</summary>
+        public static async void RunAuto()
+        {
+            if (_running || _panel == null) return;
+            int token = _session;
+            _running = true;
+            UpdatePanel();
+            try
+            {
+                var center = new System.Drawing.Point(_target.X + _target.Width / 2, _target.Y + _target.Height / 2);
+                int notches = 3;                 // шагов колеса за раз; калибруется по первому сдвигу
+                double pxPerNotch = 0;
+                int direction = -1;              // -1 = вниз по странице
+                bool directionChecked = _engine.FrameCount > 1;
+                int still = 0;
+
+                if (_engine.FrameCount == 0)
+                {
+                    using var first = await CaptureSettled(token);
+                    if (first == null || token != _session) return;
+                    _engine.Add(first, null, requireMatch: true);
+                    UpdatePanel();
+                }
+
+                while (token == _session && _running && _engine.FrameCount < 200 && _engine.ResultHeight < 60000)
+                {
+                    Win32.Wheel(center, direction * notches);
+                    await Task.Delay(150);
+                    using var img = await CaptureSettled(token);
+                    if (img == null || token != _session || !_running) return;
+
+                    int? expected = pxPerNotch > 0 ? (int)(pxPerNotch * notches) : null;
+                    var r = _engine.Add(img, expected, requireMatch: true);
+
+                    if (r == ScrollStitchEngine.Result.Appended)
+                    {
+                        directionChecked = true; still = 0;
+                        if (pxPerNotch <= 0)
+                        {
+                            pxPerNotch = _engine.LastDy / (double)notches;
+                            if (pxPerNotch > 0) notches = Math.Clamp((int)Math.Round(_target.Height * 0.6 / pxPerNotch), 1, 30);
+                        }
+                    }
+                    else
+                    {
+                        if (!directionChecked)
+                        {
+                            // первый шаг ничего не дал — возможно, инвертировано направление
+                            directionChecked = true;
+                            if (r == ScrollStitchEngine.Result.NoMatch) Win32.Wheel(center, -direction * notches);   // вернуть сдвиг
+                            direction = -direction;
+                            continue;
+                        }
+                        still++;
+                    }
+                    UpdatePanel();
+                    if (still >= 2) break;
+                }
+            }
+            finally
+            {
+                if (token == _session) { _running = false; UpdatePanel(); }
+            }
+            if (token == _session) Finish();
+        }
+
+        private static async Task<Bitmap?> CaptureSettled(int token)
+        {
+            var last = CaptureEngine.Capture(_target, sound: false);
+            for (int i = 0; i < 6 && last != null; i++)
+            {
+                if (token != _session) { last.Dispose(); return null; }
+                await Task.Delay(90);
+                var next = CaptureEngine.Capture(_target, sound: false);
+                if (next == null) return last;
+                bool eq = ScrollStitchEngine.RoughlyEqual(last, next);
+                last.Dispose();
+                last = next;
+                if (eq) break;
+            }
+            return last;
+        }
+
+        private static void UpdatePanel() => _panel?.SetState(_engine.FrameCount, _engine.ResultHeight, _running);
+
+        /// <summary>Готово / Стоп / Esc — склеить то, что есть</summary>
         public static void Finish()
         {
             var cb = _onFinished;
+            _running = false;
+            _session++;
             ClosePanel();
-            var stitched = ScrollStitcher.Stitch(_frames);
-            ClearFrames();
+            using var stitched = _engine.Finish();
+            _engine = new ScrollStitchEngine();
             if (stitched != null)
             {
-                using (stitched) cb?.Invoke(OverlayManager.Tag(BitmapUtil.ToSource(stitched), _scale));
+                CaptureEngine.PlayShutterSound();
+                cb?.Invoke(OverlayManager.Tag(BitmapUtil.ToSource(stitched), _scale));
             }
         }
 
         public static void Cancel()
         {
+            _running = false;
+            _session++;
             ClosePanel();
-            ClearFrames();
+            _engine = new ScrollStitchEngine();
             _onFinished = null;
         }
 
-        private static void ClearFrames() { foreach (var f in _frames) f.Dispose(); _frames.Clear(); }
         private static void ClosePanel() { _panel?.Close(); _panel = null; }
     }
 
     internal sealed class ScrollPanelWindow : Window
     {
-        private readonly TextBlock _count;
+        private const int HK_ESC = 0x5153;   // «QS»
+        private readonly TextBlock _title, _height, _hint;
+        private readonly System.Windows.Shapes.Ellipse _dot;
+        private readonly StackPanel _btns;
 
         public ScrollPanelWindow(Rectangle target)
         {
-            const int W = 280, H = 110;
+            const int W = 300, H = 120;
             Title = "Скролл-скриншот";
             WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize; ShowInTaskbar = false; Topmost = true;
             AllowsTransparency = true; Background = Brushes.Transparent;
             SizeToContent = SizeToContent.WidthAndHeight;
             Win32.MakeNonActivating(this);
 
+            // Панель — сбоку от области, чтобы не попасть под курсор прокрутки и в кадр
             var scale = Win32.ScaleForPoint(target.X, target.Y);
             var wa = Win32.MonitorWorkAreaFromPoint(target.X, target.Y);
-            int px = (int)Math.Min(wa.Right - W * scale - 20, Math.Max(wa.Left + 20, target.Right + 15));
-            int py = (int)Math.Max(wa.Top + 20, Math.Min(wa.Bottom - H * scale - 20, target.Y + target.Height / 2));
+            int pw = (int)(W * scale), ph = (int)(H * scale);
+            int px = target.Right + 15;
+            if (px + pw > wa.Right - 10) px = target.Left - pw - 15;
+            px = Math.Min(wa.Right - pw - 10, Math.Max(wa.Left + 10, px));
+            int py = (int)Math.Max(wa.Top + 20, Math.Min(wa.Bottom - ph - 20, target.Y + target.Height / 2));
             WindowStartupLocation = WindowStartupLocation.Manual;
-            SourceInitialized += (s, e) => Win32.SetWindowPos(new System.Windows.Interop.WindowInteropHelper(this).Handle, Win32.HWND_TOPMOST, px, py, 0, 0, Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW);
+            SourceInitialized += (s, e) =>
+            {
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                Win32.SetWindowPos(hwnd, Win32.HWND_TOPMOST, px, py, 0, 0, Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW);
+                // Esc — закончить (на время сессии; окно не активируется, поэтому глобальный хоткей)
+                Win32.RegisterHotKey(hwnd, HK_ESC, Win32.MOD_NOREPEAT, 0x1B);
+                System.Windows.Interop.HwndSource.FromHwnd(hwnd)?.AddHook((IntPtr h, int msg, IntPtr wp, IntPtr lp, ref bool handled) =>
+                {
+                    if (msg == Win32.WM_HOTKEY && wp.ToInt32() == HK_ESC) { handled = true; Dispatcher.BeginInvoke(new Action(ScrollCaptureManager.Finish)); }
+                    return IntPtr.Zero;
+                });
+            };
+            Closed += (s, e) => Win32.UnregisterHotKey(new System.Windows.Interop.WindowInteropHelper(this).Handle, HK_ESC);
 
             var root = new Border
             {
@@ -150,23 +434,43 @@ namespace QScreen
                 BorderBrush = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)), BorderThickness = new Thickness(1)
             };
             var stack = new StackPanel();
-            var head = new StackPanel { Orientation = Orientation.Horizontal };
-            head.Children.Add(new System.Windows.Shapes.Ellipse { Width = 8, Height = 8, Fill = Brushes.LimeGreen, Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center });
-            _count = new TextBlock { Foreground = Brushes.White, FontSize = 12, FontWeight = FontWeights.Bold };
-            head.Children.Add(_count);
+            var head = new DockPanel();
+            _dot = new System.Windows.Shapes.Ellipse { Width = 8, Height = 8, Fill = Brushes.LimeGreen, Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center };
+            _title = new TextBlock { Foreground = Brushes.White, FontSize = 12, FontWeight = FontWeights.Bold };
+            _height = new TextBlock { Foreground = Brushes.Gray, FontSize = 10, FontFamily = new System.Windows.Media.FontFamily("Consolas"), VerticalAlignment = VerticalAlignment.Center };
+            DockPanel.SetDock(_height, Dock.Right);
+            head.Children.Add(_height);
+            var left = new StackPanel { Orientation = Orientation.Horizontal };
+            left.Children.Add(_dot); left.Children.Add(_title);
+            head.Children.Add(left);
             stack.Children.Add(head);
-            stack.Children.Add(new TextBlock { Text = "Прокрутите страницу вниз и нажмите «+ Кадр»", Foreground = Brushes.Gray, FontSize = 10, Margin = new Thickness(0, 6, 0, 8) });
-
-            var btns = new StackPanel { Orientation = Orientation.Horizontal };
-            btns.Children.Add(Ui.MakeButton("＋ Кадр", Ui.Blue, () => ScrollCaptureManager.CaptureCurrentFrame()));
-            btns.Children.Add(Ui.MakeButton("✓ Готово", Ui.Green, () => ScrollCaptureManager.Finish()));
-            btns.Children.Add(Ui.MakeButton("Отмена", Brushes.Transparent, () => ScrollCaptureManager.Cancel(), Brushes.Gray));
-            stack.Children.Add(btns);
+            _hint = new TextBlock { Foreground = Brushes.Gray, FontSize = 10, Margin = new Thickness(0, 6, 0, 8), TextWrapping = TextWrapping.Wrap };
+            stack.Children.Add(_hint);
+            _btns = new StackPanel { Orientation = Orientation.Horizontal };
+            stack.Children.Add(_btns);
             root.Child = stack;
             Content = root;
+            SetState(0, 0, true);
         }
 
-        public void SetCount(int n) => _count.Text = $"Кадров добавлено: {n}";
+        public void SetState(int frames, int heightPx, bool running)
+        {
+            _dot.Fill = running ? Ui.Red : Brushes.LimeGreen;
+            _title.Text = running ? "Авто-прокрутка…" : $"Кадров: {frames}";
+            _height.Text = $"{heightPx} px";
+            _hint.Text = running ? "Прокручиваю и склеиваю сам. Esc или «Стоп» — закончить здесь."
+                                 : "«Авто» — прокрутить до конца самому, или вручную: прокрутите и «+ Кадр».";
+            _btns.Children.Clear();
+            if (running)
+                _btns.Children.Add(Ui.MakeButton("■ Стоп", Ui.Red, () => ScrollCaptureManager.Finish()));
+            else
+            {
+                _btns.Children.Add(Ui.MakeButton("▶ Авто", new SolidColorBrush(Color.FromRgb(175, 82, 222)), () => ScrollCaptureManager.RunAuto()));
+                _btns.Children.Add(Ui.MakeButton("＋ Кадр", Ui.Blue, () => ScrollCaptureManager.CaptureCurrentFrame()));
+                _btns.Children.Add(Ui.MakeButton("✓ Готово", Ui.Green, () => ScrollCaptureManager.Finish()));
+            }
+            _btns.Children.Add(Ui.MakeButton("Отмена", Brushes.Transparent, () => ScrollCaptureManager.Cancel(), Brushes.Gray));
+        }
     }
 
     /// <summary>Общие HUD-элементы в стиле мак-версии.</summary>
