@@ -211,6 +211,7 @@ namespace QScreen
             // --- Система ---
             stack.Children.Add(Header("Действия и система"));
             stack.Children.Add(Check("Миниатюра в углу вместо редактора (клик по ней открывает редактор)", AppSettings.ShowThumbnail, v => { AppSettings.ShowThumbnail = v; AppSettings.Save(); }));
+            stack.Children.Add(Check("Скролл-скриншот: чёткий текст (масштаб страницы ×2 на время захвата)", AppSettings.ScrollHiDPI, v => { AppSettings.ScrollHiDPI = v; AppSettings.Save(); }));
             stack.Children.Add(Check("Запуск при входе в Windows", AppSettings.IsLaunchAtLogin(), v => { try { AppSettings.SetLaunchAtLogin(v); } catch { } }));
             var upd = Ui.MakeButton("🔄 Проверить обновления...", Ui.Ghost, () => _ = UpdateChecker.CheckForUpdatesAsync(true)); upd.HorizontalAlignment = HorizontalAlignment.Left; upd.Margin = new Thickness(0, 6, 0, 0);
             stack.Children.Add(upd);

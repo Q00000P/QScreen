@@ -62,6 +62,7 @@ namespace QScreen
         public static string DateFormat = "dd.MM.yyyy_HH.mm.ss"; // или "unix"
         public static string SaveFolder = "";            // пусто = Рабочий стол
         public static bool DirectSave = false;
+        public static bool ScrollHiDPI = false;     // скролл-скриншот: масштаб страницы ×2 на время захвата — чёткий текст
         public static bool ShowThumbnail = false;   // true = миниатюра в углу ВМЕСТО редактора; по умолчанию редактор сразу
 
         // Видео
@@ -103,6 +104,7 @@ namespace QScreen
             SaveFolder = Directory.Exists(folder) ? folder : "";
             DirectSave = B("DirectSave", false);
             ShowThumbnail = B("ThumbnailInsteadOfEditor", false);
+            ScrollHiDPI = B("ScrollHiDPI", false);
 
             VideoFormat = G("VideoFormat", "mp4").ToLowerInvariant() == "mov" ? "mov" : "mp4";
             VideoCodec = G("VideoCodec", "h264").ToLowerInvariant() == "hevc" ? "hevc" : "h264";
@@ -130,6 +132,7 @@ namespace QScreen
                 $"SaveFolder={SaveFolder}",
                 $"DirectSave={DirectSave}",
                 $"ThumbnailInsteadOfEditor={ShowThumbnail}",
+                $"ScrollHiDPI={ScrollHiDPI}",
                 $"VideoFormat={VideoFormat}",
                 $"VideoCodec={VideoCodec}",
                 $"VideoFps={VideoFps}",

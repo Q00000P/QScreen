@@ -274,6 +274,17 @@ namespace QScreen
         private static Action<BitmapSource>? _onFinished;
         private static int _session;
         private static bool _running;
+        private static IntPtr _zoomedHwnd;          // окно, которому увеличили масштаб для чёткого текста
+        private const int ZoomSteps = 5;            // Chrome/Edge: 100% → 200%
+
+        /// <summary>Увести курсор на свою панель: браузер снимает hover и прячет строку со ссылкой внизу окна,
+        /// которая иначе попадала в склейку</summary>
+        private static void ParkCursor()
+        {
+            if (_panel == null) return;
+            var h = new System.Windows.Interop.WindowInteropHelper(_panel).Handle;
+            if (h != IntPtr.Zero && Win32.GetWindowRect(h, out var r)) Win32.SetCursorPos((r.Left + r.Right) / 2, (r.Top + r.Bottom) / 2);
+        }
 
         public static bool IsActive => _panel != null;
         public static bool IsRunning => _running;
@@ -313,6 +324,20 @@ namespace QScreen
                 double pxPerNotch = 0;
                 int direction = -1;              // -1 = вниз по странице
                 bool directionChecked = _engine.FrameCount > 1;
+
+                // «Чёткий текст»: увеличиваем масштаб страницы — текст рисуется реальными пикселями, а не растягивается
+                if (_engine.FrameCount == 0 && AppSettings.ScrollHiDPI)
+                {
+                    _zoomedHwnd = Win32.ActivateWindowAt(center);
+                    if (_zoomedHwnd != IntPtr.Zero)
+                    {
+                        await Task.Delay(250);
+                        for (int i = 0; i < ZoomSteps; i++) { Win32.ZoomKey(true); await Task.Delay(90); }
+                        await Task.Delay(700);   // перерисовка в новом масштабе
+                        if (token != _session) return;
+                    }
+                }
+                ParkCursor();
                 int still = 0;
 
                 if (_engine.FrameCount == 0)
@@ -329,7 +354,9 @@ namespace QScreen
                     if (misses == 0)
                     {
                         Win32.Wheel(center, direction * notches);
-                        await Task.Delay(150);
+                        await Task.Delay(60);
+                        ParkCursor();          // без курсора над ссылками
+                        await Task.Delay(90);
                     }
                     else await Task.Delay(300);   // стык не нашёлся — обычно догружаются картинки/реклама: переснимаем то же место
 
@@ -396,7 +423,7 @@ namespace QScreen
         private static void UpdatePanel() => _panel?.SetState(_engine.FrameCount, _engine.ResultHeight, _running);
 
         /// <summary>Готово / Стоп / Esc — склеить то, что есть</summary>
-        public static void Finish()
+        public static async void Finish()
         {
             var cb = _onFinished;
             _running = false;
@@ -404,6 +431,7 @@ namespace QScreen
             ClosePanel();
             using var stitched = _engine.Finish();
             _engine = new ScrollStitchEngine();
+            await RestoreZoom();   // сначала вернуть масштаб странице, потом открыть редактор поверх
             if (stitched != null)
             {
                 CaptureEngine.PlayShutterSound();
@@ -411,8 +439,19 @@ namespace QScreen
             }
         }
 
+        private static async Task RestoreZoom()
+        {
+            var h = _zoomedHwnd;
+            if (h == IntPtr.Zero) return;
+            _zoomedHwnd = IntPtr.Zero;
+            Win32.SetForegroundWindow(h);
+            await Task.Delay(200);
+            for (int i = 0; i < ZoomSteps; i++) { Win32.ZoomKey(false); await Task.Delay(90); }
+        }
+
         public static void Cancel()
         {
+            _ = RestoreZoom();
             _running = false;
             _session++;
             ClosePanel();

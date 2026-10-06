@@ -106,7 +106,11 @@ namespace QScreen
 
         // Синтетическое колесо для авто-прокрутки скролл-захвата
         [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
-        [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public MOUSEINPUT mi; }
+        [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo; }
+        [StructLayout(LayoutKind.Explicit)] public struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+        [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public InputUnion u; }
+        [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+        [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
         [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
         [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
         public const uint INPUT_MOUSE = 0, MOUSEEVENTF_WHEEL = 0x0800;
@@ -115,8 +119,28 @@ namespace QScreen
         public static void Wheel(System.Drawing.Point at, int notches)
         {
             SetCursorPos(at.X, at.Y);   // колесо получает окно под курсором
-            var input = new INPUT { type = INPUT_MOUSE, mi = new MOUSEINPUT { mouseData = unchecked((uint)(notches * 120)), dwFlags = MOUSEEVENTF_WHEEL } };
+            var input = new INPUT { type = INPUT_MOUSE, u = new InputUnion { mi = new MOUSEINPUT { mouseData = unchecked((uint)(notches * 120)), dwFlags = MOUSEEVENTF_WHEEL } } };
             SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>());
+        }
+
+        /// <summary>Сделать активным окно верхнего уровня под точкой (чтобы ему ушли Ctrl+= / Ctrl+-)</summary>
+        public static IntPtr ActivateWindowAt(System.Drawing.Point p)
+        {
+            var h = WindowFromPoint(new POINT { X = p.X, Y = p.Y });
+            if (h == IntPtr.Zero) return IntPtr.Zero;
+            var root = GetAncestor(h, 2 /* GA_ROOT */);
+            if (root == IntPtr.Zero) return IntPtr.Zero;
+            SetForegroundWindow(root);
+            return root;
+        }
+
+        /// <summary>Ctrl+= (масштаб +) или Ctrl+- (масштаб −) активному окну</summary>
+        public static void ZoomKey(bool plus)
+        {
+            ushort vk = plus ? (ushort)0xBB /* VK_OEM_PLUS */ : (ushort)0xBD /* VK_OEM_MINUS */;
+            static INPUT K(ushort v, bool up) => new INPUT { type = 1, u = new InputUnion { ki = new KEYBDINPUT { wVk = v, dwFlags = up ? 2u : 0u } } };
+            var seq = new[] { K(0x11, false), K(vk, false), K(vk, true), K(0x11, true) };
+            SendInput((uint)seq.Length, seq, Marshal.SizeOf<INPUT>());
         }
 
         public static void ApplyDarkMode(Window window)

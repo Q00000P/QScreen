@@ -523,6 +523,38 @@ enum ScrollInput {
             usleep(4000)
         }
     }
+
+    /// Увести курсор с области (на свою панель): браузер снимает hover и прячет строку со ссылкой внизу окна,
+    /// которая иначе попадала в склейку
+    static func park(at p: CGPoint) {
+        CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+    }
+
+    /// Активировать приложение, чьё окно под точкой (не QScreen), — чтобы ему ушли Cmd+= / Cmd+-
+    static func activateApp(at p: CGPoint) -> pid_t? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        let me = getpid()
+        for w in list {
+            guard (w[kCGWindowLayer as String] as? Int) == 0,
+                  let pid = w[kCGWindowOwnerPID as String] as? pid_t, pid != me,
+                  let bd = w[kCGWindowBounds as String] as? [String: Any],
+                  let r = CGRect(dictionaryRepresentation: bd as CFDictionary), r.contains(p) else { continue }
+            NSRunningApplication(processIdentifier: pid)?.activate(options: [])
+            return pid
+        }
+        return nil
+    }
+
+    /// Cmd+'=' (масштаб +) или Cmd+'-' (масштаб −)
+    static func zoomKey(plus: Bool) {
+        let code: CGKeyCode = plus ? 24 : 27
+        for down in [true, false] {
+            if let e = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) {
+                e.flags = .maskCommand
+                e.post(tap: .cghidEventTap)
+            }
+        }
+    }
 }
 
 @MainActor
@@ -548,6 +580,14 @@ final class ScrollCaptureManager {
     private var autoTask: Task<Void, Never>?
     private var escMonitors: [Any] = []
     private let model = ScrollPanelModel()
+    private var zoomedPID: pid_t?         // приложение, которому увеличили масштаб для чёткого текста
+    private let zoomSteps = 5             // Chrome/Safari: 100% → ~200%
+
+    private var parkPoint: CGPoint? {
+        guard let f = panelWindow?.frame else { return nil }
+        let q = Coord.toQuartz(f)
+        return CGPoint(x: q.midX, y: q.midY)
+    }
 
     var isActive: Bool { panelWindow != nil }
 
@@ -595,6 +635,20 @@ final class ScrollCaptureManager {
             var direction: Int32 = -1
             var directionChecked = self.engine.frameCount > 1
 
+            // «Чёткий текст»: увеличиваем масштаб страницы — текст рисуется реальными пикселями, а не растягивается
+            if self.engine.frameCount == 0 && UserDefaults.standard.bool(forKey: "scrollHiDPI"),
+               let pid = ScrollInput.activateApp(at: center) {
+                self.zoomedPID = pid
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                for _ in 0..<self.zoomSteps {
+                    ScrollInput.zoomKey(plus: true)
+                    try? await Task.sleep(nanoseconds: 90_000_000)
+                }
+                try? await Task.sleep(nanoseconds: 700_000_000)   // перерисовка в новом масштабе
+                guard token == self.session else { return }
+            }
+            if let pp = self.parkPoint { ScrollInput.park(at: pp) }
+
             if self.engine.frameCount == 0 {
                 guard let first = await self.captureSettled(token) else { return }
                 guard token == self.session else { return }
@@ -606,7 +660,9 @@ final class ScrollCaptureManager {
             while token == self.session, !Task.isCancelled, self.engine.frameCount < 200, self.engine.resultHeight < 60000 {
                 if misses == 0 {
                     ScrollInput.scroll(points: step, direction: direction, at: center)
-                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    try? await Task.sleep(nanoseconds: 60_000_000)
+                    if let pp = self.parkPoint { ScrollInput.park(at: pp) }   // без курсора над ссылками
+                    try? await Task.sleep(nanoseconds: 100_000_000)
                 } else {
                     // стык не нашёлся — обычно догружаются картинки/реклама: ждём и переснимаем то же место
                     try? await Task.sleep(nanoseconds: 300_000_000)
@@ -667,14 +723,32 @@ final class ScrollCaptureManager {
         session += 1
         busy = false
         model.running = false
-        guard let cg = engine.finish() else { return }
+        let cg = engine.finish()
         engine = ScrollStitchEngine()
-        playShutterSound()
-        onFinished?(NSImage(cgImage: cg, size: NSSize(width: CGFloat(cg.width) / scale, height: CGFloat(cg.height) / scale)))
+        let deliver = onFinished
+        let sc = scale
+        Task { @MainActor in
+            await self.restoreZoom()        // сначала вернуть масштаб странице, потом открыть редактор поверх
+            guard let cg = cg else { return }
+            playShutterSound()
+            deliver?(NSImage(cgImage: cg, size: NSSize(width: CGFloat(cg.width) / sc, height: CGFloat(cg.height) / sc)))
+        }
+    }
+
+    private func restoreZoom() async {
+        guard let pid = zoomedPID else { return }
+        zoomedPID = nil
+        NSRunningApplication(processIdentifier: pid)?.activate(options: [])
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        for _ in 0..<zoomSteps {
+            ScrollInput.zoomKey(plus: false)
+            try? await Task.sleep(nanoseconds: 90_000_000)
+        }
     }
 
     func cancelSession() {
         autoTask?.cancel(); autoTask = nil
+        if zoomedPID != nil { Task { @MainActor in await self.restoreZoom() } }
         removeEscMonitor()
         closePanel()
         engine = ScrollStitchEngine()
@@ -3230,6 +3304,7 @@ struct CaptureEditorView: View {
 struct SettingsWindowView: View {
     @State private var launchAtLogin = (SMAppService.mainApp.status == .enabled)
     @AppStorage("showThumbnail") private var showThumbnail = false
+    @AppStorage("scrollHiDPI") private var scrollHiDPI = false
     @AppStorage("defaultImageFormat") private var defaultImageFormat = "png"
     @AppStorage("jpegQuality") private var jpegQuality = 0.85
     @AppStorage("filenamePrefix") private var filenamePrefix = "QScreen"
@@ -3437,6 +3512,7 @@ struct SettingsWindowView: View {
                     .font(.system(size: 13, weight: .bold))
 
                 Toggle("Миниатюра в углу вместо редактора (клик по ней открывает редактор)", isOn: $showThumbnail)
+                Toggle("Скролл-скриншот: чёткий текст (масштаб страницы ×2 на время захвата)", isOn: $scrollHiDPI)
                 Toggle("Запуск при входе в macOS", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { val in
                         do {
