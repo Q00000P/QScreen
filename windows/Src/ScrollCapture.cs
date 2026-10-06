@@ -41,7 +41,7 @@ namespace QScreen
         public int ResultHeight => FrameCount <= 1 ? Height : _outRows + _lastBottom;
 
         /// <param name="requireMatch">авто-режим: без надёжного совпадения кадр не добавляется (лучше пропуск, чем дубль)</param>
-        public Result Add(Bitmap frame, int? expectedDy, bool requireMatch)
+        public Result Add(Bitmap frame, int? expectedDy, bool requireMatch, bool relaxed = false)
         {
             var px = Pixels(frame);
             if (FrameCount == 0)
@@ -60,7 +60,7 @@ namespace QScreen
             int region = Height - top - bot;
             if (region <= 16) return Result.Identical;
 
-            int? found = FindOffset(_prevSig, sig, top, bot, expectedDy);
+            int? found = FindOffset(_prevSig, sig, top, bot, expectedDy, MovingBins(_prevSig, sig), relaxed ? 6.0f : 3.0f);
             if (found == null)
             {
                 if (requireMatch) return Result.NoMatch;
@@ -171,35 +171,63 @@ namespace QScreen
             return sig;
         }
 
-        private static float RowDiff(float[] a, int ya, float[] b, int yb)
+        /// <summary>Строка не изменилась: допускаем до 10% «живых» столбцов (анимация, индикатор, эквалайзер в шапке)</summary>
+        private static bool RowStatic(float[] a, float[] b, int y)
+        {
+            int i = y * Bins, n = 0;
+            for (int k = 0; k < Bins; k++)
+                if (Math.Abs(a[i + k] - b[i + k]) > 4 && ++n > Bins / 10) return false;
+            return true;
+        }
+
+        /// <summary>Средняя разница строк только по «подвижным» столбцам</summary>
+        private static float RowDiff(float[] a, int ya, float[] b, int yb, int[] bins)
         {
             float d = 0; int ia = ya * Bins, ib = yb * Bins;
-            for (int k = 0; k < Bins; k++) d += Math.Abs(a[ia + k] - b[ib + k]);
-            return d / Bins;
+            foreach (var k in bins) d += Math.Abs(a[ia + k] - b[ib + k]);
+            return d / bins.Length;
+        }
+
+        /// <summary>Столбцы, которые между кадрами почти нигде не поменялись, — закреплённые боковые панели или пустые поля.
+        /// В поиске сдвига они только мешают: у правильного dy они «не совпадают», потому что не уехали вместе с контентом.</summary>
+        private int[] MovingBins(float[] a, float[] b)
+        {
+            var same = new int[Bins]; int rows = 0;
+            for (int y = 0; y < Height; y += 2)
+            {
+                rows++;
+                for (int k = 0; k < Bins; k++) if (Math.Abs(a[y * Bins + k] - b[y * Bins + k]) < 1.5f) same[k]++;
+            }
+            var moving = new List<int>();
+            for (int k = 0; k < Bins; k++) if (same[k] < rows * 0.92) moving.Add(k);
+            if (moving.Count < 8) { moving.Clear(); for (int k = 0; k < Bins; k++) moving.Add(k); }
+            return moving.ToArray();
         }
 
         private bool IsIdentical(float[] a, float[] b)
         {
-            for (int y = 0; y < Height; y += 2) if (RowDiff(a, y, b, y) > 0.6f) return false;
-            return true;
+            int total = 0, same = 0;
+            for (int y = 0; y < Height; y += 2) { total++; if (RowStatic(a, b, y)) same++; }
+            return same >= total * 0.97;   // анимация в паре мест не считается движением
         }
 
         private int StaticTop(float[] a, float[] b)
         {
             int y = 0;
-            while (y < Height / 3 && RowDiff(a, y, b, y) < 0.8f) y++;
+            while (y < Height / 3 && RowStatic(a, b, y)) y++;
             return y;
         }
 
         private int StaticBottom(float[] a, float[] b, int top)
         {
             int n = 0;
-            while (n < Height / 3 && Height - 1 - n > top && RowDiff(a, Height - 1 - n, b, Height - 1 - n) < 0.8f) n++;
+            while (n < Height / 3 && Height - 1 - n > top && RowStatic(a, b, Height - 1 - n)) n++;
             return n;
         }
 
-        /// <summary>Сдвиг dy: строка y нового кадра == строка y+dy прошлого (контент уехал вверх на dy)</summary>
-        private int? FindOffset(float[] prev, float[] cur, int top, int bottom, int? expected)
+        /// <summary>Сдвиг dy: строка y нового кадра == строка y+dy прошлого (контент уехал вверх на dy).
+        /// Оценка — усечённое среднее (лучшие 80% строк): анимации, подгружающиеся картинки и реклама не ломают стык.</summary>
+        private int? FindOffset(float[] prev, float[] cur, int top, int bottom, int? expected, int[] bins, float threshold)
         {
             int n = Height - top - bottom;
             int minOverlap = Math.Max(24, n / 10);
@@ -209,35 +237,30 @@ namespace QScreen
             for (int k = 0; k < n; k++)
             {
                 int bs = (top + k) * Bins; float lo = 255, hi = 0;
-                for (int b = 0; b < Bins; b++) { float v = cur[bs + b]; if (v < lo) lo = v; if (v > hi) hi = v; }
+                foreach (var b in bins) { float v = cur[bs + b]; if (v < lo) lo = v; if (v > hi) hi = v; }
                 if (hi - lo > 10) info.Add(k);
             }
             if (info.Count < 12) { info.Clear(); for (int k = 0; k < n; k += 2) info.Add(k); }
 
             int bestDy = -1; float bestCost = float.MaxValue;
             int valid = info.Count;
+            var diffs = new List<float>(160);
             for (int dy = 1; dy <= n - minOverlap; dy++)
             {
                 int m = n - dy;
                 while (valid > 0 && info[valid - 1] >= m) valid--;
                 if (valid < 8) continue;
                 int step = Math.Max(1, valid / 140);
-                int samples = (valid + step - 1) / step;
-                double limit = bestCost == float.MaxValue ? double.MaxValue : (double)bestCost * samples;
-                double sum = 0;
-                bool over = false;
-                for (int i = 0; i < valid; i += step)
-                {
-                    int k = info[i];
-                    sum += RowDiff(prev, top + dy + k, cur, top + k);
-                    if (sum > limit) { over = true; break; }
-                }
-                if (over) continue;
-                float cost = (float)(sum / samples);
+                diffs.Clear();
+                for (int i = 0; i < valid; i += step) diffs.Add(RowDiff(prev, top + dy + info[i], cur, top + info[i], bins));
+                diffs.Sort();
+                int keep = Math.Max(1, diffs.Count * 4 / 5);
+                float sum = 0; for (int j = 0; j < keep; j++) sum += diffs[j];
+                float cost = sum / keep;
                 if (expected.HasValue) cost += Math.Abs(dy - expected.Value) * 0.0015f;   // при равенстве — ближе к ожидаемому шагу
                 if (cost < bestCost) { bestCost = cost; bestDy = dy; }
             }
-            return bestDy > 0 && bestCost < 4.0f ? bestDy : null;
+            return bestDy > 0 && bestCost < threshold ? bestDy : null;
         }
     }
 
@@ -300,36 +323,47 @@ namespace QScreen
                     UpdatePanel();
                 }
 
+                int misses = 0;
                 while (token == _session && _running && _engine.FrameCount < 200 && _engine.ResultHeight < 60000)
                 {
-                    Win32.Wheel(center, direction * notches);
-                    await Task.Delay(150);
+                    if (misses == 0)
+                    {
+                        Win32.Wheel(center, direction * notches);
+                        await Task.Delay(150);
+                    }
+                    else await Task.Delay(300);   // стык не нашёлся — обычно догружаются картинки/реклама: переснимаем то же место
+
                     using var img = await CaptureSettled(token);
                     if (img == null || token != _session || !_running) return;
 
                     int? expected = pxPerNotch > 0 ? (int)(pxPerNotch * notches) : null;
-                    var r = _engine.Add(img, expected, requireMatch: true);
+                    var r = _engine.Add(img, expected, requireMatch: true, relaxed: misses >= 2);
 
                     if (r == ScrollStitchEngine.Result.Appended)
                     {
-                        directionChecked = true; still = 0;
+                        directionChecked = true; still = 0; misses = 0;
                         if (pxPerNotch <= 0)
                         {
                             pxPerNotch = _engine.LastDy / (double)notches;
                             if (pxPerNotch > 0) notches = Math.Clamp((int)Math.Round(_target.Height * 0.6 / pxPerNotch), 1, 30);
                         }
                     }
-                    else
+                    else if (r == ScrollStitchEngine.Result.Identical)
                     {
+                        misses = 0;
                         if (!directionChecked)
                         {
-                            // первый шаг ничего не дал — возможно, инвертировано направление
+                            // первый шаг страницу не сдвинул — пробуем в другую сторону
                             directionChecked = true;
-                            if (r == ScrollStitchEngine.Result.NoMatch) Win32.Wheel(center, -direction * notches);   // вернуть сдвиг
                             direction = -direction;
                             continue;
                         }
-                        still++;
+                        still++;                        // конец страницы — только когда реально ничего не движется
+                    }
+                    else
+                    {
+                        misses++;
+                        if (misses > 3) still = 2;      // стык так и не нашёлся — заканчиваем на склеенном
                     }
                     UpdatePanel();
                     if (still >= 2) break;

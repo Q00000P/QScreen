@@ -49,7 +49,7 @@ namespace QScreen
     public static class UpdateChecker
     {
         public const string CurrentVersion = "10.1.0";
-        public const string BuildTag = "w11"; // метка сборки для трея — поднимать при каждой правке
+        public const string BuildTag = "w12"; // метка сборки для трея — поднимать при каждой правке
         public const string Repo = "Q00000P/QScreen";
 
         public static async Task CheckForUpdatesAsync(bool isUserInitiated = false)

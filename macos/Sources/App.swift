@@ -272,7 +272,7 @@ final class ScrollStitchEngine {
     var resultHeight: Int { frameCount <= 1 ? height : outRows + lastBottom }
 
     /// requireMatch: в авто-режиме кадр без надёжного совпадения не добавляется (лучше пропуск, чем дубль)
-    func add(_ img: CGImage, expectedDy: Int?, requireMatch: Bool) -> AddResult {
+    func add(_ img: CGImage, expectedDy: Int?, requireMatch: Bool, relaxed: Bool = false) -> AddResult {
         if frameCount == 0 {
             if let cs = img.colorSpace, cs.supportsOutput { colorSpace = cs }
             guard let px = Self.pixels(img, colorSpace) else { return .noMatch }
@@ -290,7 +290,8 @@ final class ScrollStitchEngine {
         let region = height - top - bot
         guard region > 16 else { return .identical }
 
-        var dy = findOffset(prevSig, sig, top: top, bottom: bot, expected: expectedDy)
+        var dy = findOffset(prevSig, sig, top: top, bottom: bot, expected: expectedDy,
+                            bins: movingBins(prevSig, sig), threshold: relaxed ? 6.0 : 3.0)
         if dy == nil {
             if requireMatch { return .noMatch }
             dy = region      // ручной режим, прокрутили дальше, чем на экран: стыкуем без нахлёста
@@ -372,25 +373,60 @@ final class ScrollStitchEngine {
         return sig
     }
 
-    @inline(__always) private func rowDiff(_ a: UnsafeBufferPointer<Float>, _ ya: Int, _ b: UnsafeBufferPointer<Float>, _ yb: Int) -> Float {
+    /// Строка не изменилась: допускаем до 10% «живых» столбцов (анимация, мигающий индикатор, эквалайзер в шапке)
+    @inline(__always) private func rowStatic(_ a: UnsafeBufferPointer<Float>, _ b: UnsafeBufferPointer<Float>, _ y: Int) -> Bool {
+        let B = Self.bins, i = y * B
+        var n = 0
+        for k in 0..<B where abs(a[i + k] - b[i + k]) > 4 {
+            n += 1
+            if n > B / 10 { return false }
+        }
+        return true
+    }
+
+    /// Средняя разница строк только по «подвижным» столбцам
+    @inline(__always) private func rowDiff(_ a: UnsafeBufferPointer<Float>, _ ya: Int, _ b: UnsafeBufferPointer<Float>, _ yb: Int,
+                                           _ bins: UnsafeBufferPointer<Int>) -> Float {
         let B = Self.bins
         var d: Float = 0
         let ia = ya * B, ib = yb * B
-        for k in 0..<B { d += abs(a[ia + k] - b[ib + k]) }
-        return d / Float(B)
+        for k in bins { d += abs(a[ia + k] - b[ib + k]) }
+        return d / Float(bins.count)
+    }
+
+    /// Столбцы, которые между кадрами почти нигде не поменялись, — закреплённые боковые панели или пустые поля.
+    /// В поиске сдвига они только мешают: у правильного dy они «не совпадают», потому что не уехали вместе с контентом.
+    private func movingBins(_ a: [Float], _ b: [Float]) -> [Int] {
+        let B = Self.bins
+        var same = [Int](repeating: 0, count: B)
+        var rows = 0
+        a.withUnsafeBufferPointer { (pa: UnsafeBufferPointer<Float>) -> Void in
+            b.withUnsafeBufferPointer { (pb: UnsafeBufferPointer<Float>) -> Void in
+                for y in stride(from: 0, to: height, by: 2) {
+                    rows += 1
+                    for k in 0..<B where abs(pa[y * B + k] - pb[y * B + k]) < 1.5 { same[k] += 1 }
+                }
+            }
+        }
+        let moving = (0..<B).filter { Double(same[$0]) < Double(rows) * 0.92 }
+        return moving.count >= 8 ? moving : Array(0..<B)
     }
 
     private func isIdentical(_ a: [Float], _ b: [Float]) -> Bool {
         a.withUnsafeBufferPointer { pa -> Bool in b.withUnsafeBufferPointer { pb -> Bool in
-            for y in stride(from: 0, to: height, by: 2) where rowDiff(pa, y, pb, y) > 0.6 { return false }
-            return true
+            var total = 0, same = 0
+            for y in stride(from: 0, to: height, by: 2) {
+                total += 1
+                if rowStatic(pa, pb, y) { same += 1 }
+            }
+            return Double(same) >= Double(total) * 0.97     // анимация в паре мест не считается движением
         } }
     }
 
     private func staticTop(_ a: [Float], _ b: [Float]) -> Int {
         a.withUnsafeBufferPointer { pa -> Int in b.withUnsafeBufferPointer { pb -> Int in
             var y = 0
-            while y < height / 3 && rowDiff(pa, y, pb, y) < 0.8 { y += 1 }
+            while y < height / 3 && rowStatic(pa, pb, y) { y += 1 }
             return y
         } }
     }
@@ -398,24 +434,26 @@ final class ScrollStitchEngine {
     private func staticBottom(_ a: [Float], _ b: [Float], top: Int) -> Int {
         a.withUnsafeBufferPointer { pa -> Int in b.withUnsafeBufferPointer { pb -> Int in
             var n = 0
-            while n < height / 3 && height - 1 - n > top && rowDiff(pa, height - 1 - n, pb, height - 1 - n) < 0.8 { n += 1 }
+            while n < height / 3 && height - 1 - n > top && rowStatic(pa, pb, height - 1 - n) { n += 1 }
             return n
         } }
     }
 
-    /// Сдвиг dy: строка y нового кадра == строка y+dy прошлого (контент уехал вверх на dy)
-    private func findOffset(_ prev: [Float], _ cur: [Float], top: Int, bottom: Int, expected: Int?) -> Int? {
+    /// Сдвиг dy: строка y нового кадра == строка y+dy прошлого (контент уехал вверх на dy).
+    /// Оценка — усечённое среднее (лучшие 80% строк): анимации, подгружающиеся картинки и реклама не ломают стык.
+    private func findOffset(_ prev: [Float], _ cur: [Float], top: Int, bottom: Int, expected: Int?,
+                            bins: [Int], threshold: Float) -> Int? {
         let n = height - top - bottom
         let B = Self.bins
         let minOverlap = max(24, n / 10)
         guard n - minOverlap >= 1 else { return nil }
-        return prev.withUnsafeBufferPointer { pp -> Int? in cur.withUnsafeBufferPointer { pc -> Int? in
-            // Информативные строки нового кадра (есть перепад яркости) — пустые совпадают с чем угодно
+        return prev.withUnsafeBufferPointer { pp -> Int? in cur.withUnsafeBufferPointer { pc -> Int? in bins.withUnsafeBufferPointer { pb -> Int? in
+            // Информативные строки нового кадра (есть перепад яркости в подвижных столбцах) — пустые совпадают с чем угодно
             var info: [Int] = []
             for k in 0..<n {
                 let base = (top + k) * B
                 var lo: Float = 255, hi: Float = 0
-                for b in 0..<B { let v = pc[base + b]; lo = min(lo, v); hi = max(hi, v) }
+                for b in pb { let v = pc[base + b]; lo = min(lo, v); hi = max(hi, v) }
                 if hi - lo > 10 { info.append(k) }
             }
             if info.count < 12 { info = Array(stride(from: 0, to: n, by: 2)) }
@@ -423,29 +461,30 @@ final class ScrollStitchEngine {
             var bestDy = -1
             var bestCost = Float.greatestFiniteMagnitude
             var valid = info.count            // нахлёст с ростом dy только уменьшается
+            var diffs: [Float] = []
+            diffs.reserveCapacity(160)
             for dy in 1...(n - minOverlap) {
                 let m = n - dy
-                // до 140 строк, равномерно по тем, что попадают в нахлёст
                 while valid > 0 && info[valid - 1] >= m { valid -= 1 }
                 guard valid >= 8 else { continue }
                 let step = max(1, valid / 140)
-                let samples = (valid + step - 1) / step
-                let limit = bestCost * Float(samples)
-                var sum: Float = 0
+                diffs.removeAll(keepingCapacity: true)
                 var i = 0
                 while i < valid {
                     let k = info[i]
-                    sum += rowDiff(pp, top + dy + k, pc, top + k)
-                    if sum > limit { break }
+                    diffs.append(rowDiff(pp, top + dy + k, pc, top + k, pb))
                     i += step
                 }
-                if sum > limit { continue }
-                var cost = sum / Float(samples)
+                diffs.sort()
+                let keep = max(1, diffs.count * 4 / 5)
+                var sum: Float = 0
+                for j in 0..<keep { sum += diffs[j] }
+                var cost = sum / Float(keep)
                 if let e = expected { cost += Float(abs(dy - e)) * 0.0015 }   // при равенстве — ближе к ожидаемому шагу
                 if cost < bestCost { bestCost = cost; bestDy = dy }
             }
-            return (bestDy > 0 && bestCost < 4.0) ? bestDy : nil
-        } }
+            return (bestDy > 0 && bestCost < threshold) ? bestDy : nil
+        } } }
     }
 
     private static func pixels(_ img: CGImage, _ cs: CGColorSpace) -> [UInt8]? {
@@ -563,24 +602,33 @@ final class ScrollCaptureManager {
                 self.updateModel()
             }
             var still = 0
+            var misses = 0
             while token == self.session, !Task.isCancelled, self.engine.frameCount < 200, self.engine.resultHeight < 60000 {
-                ScrollInput.scroll(points: step, direction: direction, at: center)
-                try? await Task.sleep(nanoseconds: 150_000_000)
+                if misses == 0 {
+                    ScrollInput.scroll(points: step, direction: direction, at: center)
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                } else {
+                    // стык не нашёлся — обычно догружаются картинки/реклама: ждём и переснимаем то же место
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                }
                 guard let img = await self.captureSettled(token), token == self.session, !Task.isCancelled else { return }
-                let r = self.engine.add(img, expectedDy: Int(step * self.scale), requireMatch: true)
+                let r = self.engine.add(img, expectedDy: Int(step * self.scale), requireMatch: true, relaxed: misses >= 2)
                 switch r {
                 case .appended:
                     directionChecked = true
-                    still = 0
-                case .identical, .noMatch, .first:
+                    still = 0; misses = 0
+                case .identical:
+                    misses = 0
                     if !directionChecked {
-                        // Первый шаг ничего не дал — возможно, инвертировано направление: пробуем в другую сторону
+                        // первый шаг страницу не сдвинул — пробуем в другую сторону (инвертированное направление)
                         directionChecked = true
                         direction = -direction
-                        if case .noMatch = r { ScrollInput.scroll(points: step, direction: direction, at: center) }   // вернуть сдвиг
                         continue
                     }
-                    still += 1
+                    still += 1                       // конец страницы — только когда реально ничего не движется
+                case .noMatch, .first:
+                    misses += 1
+                    if misses > 3 { still = 2 }      // стык так и не нашёлся — заканчиваем на уже склеенном
                 }
                 self.updateModel()
                 if still >= 2 { break }
