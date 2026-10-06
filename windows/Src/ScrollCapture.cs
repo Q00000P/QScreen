@@ -322,8 +322,9 @@ namespace QScreen
                 var center = new System.Drawing.Point(_target.X + _target.Width / 2, _target.Y + _target.Height / 2);
                 int notches = 3;                 // шагов колеса за раз; калибруется по первому сдвигу
                 double pxPerNotch = 0;
-                int direction = -1;              // -1 = вниз по странице
-                bool directionChecked = _engine.FrameCount > 1;
+                bool direct = true;              // колесо сообщением окну, без движения курсора
+                bool firstStep = _engine.FrameCount <= 1;
+                int still = 0;
 
                 // «Чёткий текст»: увеличиваем масштаб страницы — текст рисуется реальными пикселями, а не растягивается
                 if (_engine.FrameCount == 0 && AppSettings.ScrollHiDPI)
@@ -337,8 +338,7 @@ namespace QScreen
                         if (token != _session) return;
                     }
                 }
-                ParkCursor();
-                int still = 0;
+                ParkCursor();   // один раз: курсор на панель, к кнопке «Стоп», и не висит над ссылками
 
                 if (_engine.FrameCount == 0)
                 {
@@ -353,10 +353,9 @@ namespace QScreen
                 {
                     if (misses == 0)
                     {
-                        Win32.Wheel(center, direction * notches);
-                        await Task.Delay(60);
-                        ParkCursor();          // без курсора над ссылками
-                        await Task.Delay(90);
+                        if (direct) Win32.WheelTo(center, -notches);
+                        else await Win32.WheelViaCursor(center, -notches);
+                        await Task.Delay(150);
                     }
                     else await Task.Delay(300);   // стык не нашёлся — обычно догружаются картинки/реклама: переснимаем то же место
 
@@ -368,7 +367,7 @@ namespace QScreen
 
                     if (r == ScrollStitchEngine.Result.Appended)
                     {
-                        directionChecked = true; still = 0; misses = 0;
+                        firstStep = false; still = 0; misses = 0;
                         if (pxPerNotch <= 0)
                         {
                             pxPerNotch = _engine.LastDy / (double)notches;
@@ -378,13 +377,13 @@ namespace QScreen
                     else if (r == ScrollStitchEngine.Result.Identical)
                     {
                         misses = 0;
-                        if (!directionChecked)
+                        if (firstStep && direct)
                         {
-                            // первый шаг страницу не сдвинул — пробуем в другую сторону
-                            directionChecked = true;
-                            direction = -direction;
+                            // окно не приняло колесо сообщением — дальше через курсор (на миг, с возвратом на место)
+                            direct = false;
                             continue;
                         }
+                        firstStep = false;
                         still++;                        // конец страницы — только когда реально ничего не движется
                     }
                     else

@@ -303,6 +303,7 @@ namespace QScreen
             actions.Children.Add(dragBtn);
             actions.Children.Add(Ui.IconButton("📌", PinScreenshot, "Закрепить поверх окон (Pin)"));
             actions.Children.Add(Ui.IconButton("🔍", RunOcr, "OCR Распознавание текста"));
+            actions.Children.Add(Ui.IconButton("🪄", UpscaleAi, "Улучшить ×2 (нейросеть): чётче текст и края"));
             _undoBtn = Ui.IconButton("↶", Undo, "Отменить (Ctrl+Z)");
             actions.Children.Add(_undoBtn);
             toolbar.Children.Add(actions);
@@ -473,12 +474,45 @@ namespace QScreen
             }
         }
 
-        private void ShowToast(string text)
+        private DispatcherTimer? _toastTimer;
+        /// <param name="persist">не прятать сам (прогресс долгой операции)</param>
+        private void ShowToast(string text, bool persist = false)
         {
             _toast.Text = text; _toastBorder.Visibility = Visibility.Visible;
-            var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-            t.Tick += (o, e) => { t.Stop(); _toastBorder.Visibility = Visibility.Collapsed; };
-            t.Start();
+            _toastTimer?.Stop();
+            if (persist) return;
+            _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _toastTimer.Tick += (o, e) => { _toastTimer?.Stop(); _toastBorder.Visibility = Visibility.Collapsed; };
+            _toastTimer.Start();
+        }
+
+        // ---------- Улучшить ×2 ----------
+        private bool _upscaling;
+
+        /// <summary>Нейросеть ×2: картинка с аннотациями «запекается», пикселей становится вдвое больше по каждой стороне,
+        /// на экране размер тот же (DPI ×2), при сохранении — полное разрешение</summary>
+        private async void UpscaleAi()
+        {
+            if (_upscaling) return;
+            var model = await AiUpscaler.EnsureModelAsync();
+            if (model == null) return;
+            var src = RenderFinalImage(ignoreBeautify: true);
+            if ((long)src.PixelWidth * src.PixelHeight > 40_000_000) { ShowToast("Слишком большая картинка для ×2"); return; }
+            _upscaling = true;
+            ShowToast("Улучшаю ×2…", persist: true);
+            try
+            {
+                var up = await System.Threading.Tasks.Task.Run(() => AiUpscaler.Upscale2x(src, p =>
+                    Dispatcher.BeginInvoke(new Action(() => ShowToast($"Улучшаю ×2… {(int)(p * 100)}%" + (AiUpscaler.UsesGpu ? "" : " (процессор)"), persist: true)))));
+                CommitActiveText();
+                _items.Clear();
+                _scale *= 2;
+                SetImage(OverlayManager.Tag(up, _scale));
+                UpdateUndo();
+                ShowToast($"Готово: {up.PixelWidth}×{up.PixelHeight}");
+            }
+            catch (Exception ex) { ShowToast("Не удалось улучшить: " + ex.Message); }
+            finally { _upscaling = false; }
         }
 
         // ---------- Ввод ----------

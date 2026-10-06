@@ -11,6 +11,9 @@ import AVFoundation
 import ImageIO
 import ScreenCaptureKit
 import Combine
+import Metal
+import MetalPerformanceShadersGraph
+import CryptoKit
 
 // --- OTA Автообновление через GitHub ---
 public enum UpdateChecker {
@@ -508,41 +511,69 @@ final class ScrollStitchEngine {
     }
 }
 
-/// Синтетическая прокрутка колесом в точке (Quartz-глобальные координаты). Нужен «Универсальный доступ».
+/// Синтетическая прокрутка. Нужен «Универсальный доступ».
 enum ScrollInput {
-    static func scroll(points: CGFloat, direction: Int32, at p: CGPoint) {
-        CGWarpMouseCursorPosition(p)     // колесо получает окно под курсором
+    /// Окно другого приложения под точкой (Quartz-глобально)
+    static func windowAt(_ p: CGPoint) -> (pid: pid_t, id: CGWindowID)? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        let me = getpid()
+        for w in list {
+            guard (w[kCGWindowLayer as String] as? Int) == 0,
+                  let pid = w[kCGWindowOwnerPID as String] as? pid_t, pid != me,
+                  let wid = w[kCGWindowNumber as String] as? CGWindowID,
+                  let bd = w[kCGWindowBounds as String] as? [String: Any],
+                  let r = CGRect(dictionaryRepresentation: bd as CFDictionary), r.contains(p) else { continue }
+            return (pid, wid)
+        }
+        return nil
+    }
+
+    private static func wheelEvent(_ step: Int, at p: CGPoint) -> CGEvent? {
+        let ev = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -Int32(step), wheel2: 0, wheel3: 0)
+        ev?.location = p
+        return ev
+    }
+
+    /// Колесо прямо приложению, адресно в его окно: курсор не двигается, мышью можно пользоваться
+    static func scrollDirect(points: CGFloat, at p: CGPoint, pid: pid_t, windowID: CGWindowID) {
         var left = Int(points)
         while left > 0 {
             let step = min(left, 60)
-            if let ev = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(step) * direction, wheel2: 0, wheel3: 0) {
-                ev.location = p
-                ev.post(tap: .cghidEventTap)
+            if let ev = wheelEvent(step, at: p) {
+                ev.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
+                ev.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
+                ev.postToPid(pid)
             }
             left -= step
             usleep(4000)
         }
     }
 
-    /// Увести курсор с области (на свою панель): браузер снимает hover и прячет строку со ссылкой внизу окна,
-    /// которая иначе попадала в склейку
+    /// Запасной путь для приложений, которые не берут адресное колесо: курсор на миг в точку, колесо, курсор обратно
+    static func scrollViaCursor(points: CGFloat, at p: CGPoint) async {
+        let old = CGEvent(source: nil)?.location ?? p
+        CGWarpMouseCursorPosition(p)
+        var left = Int(points)
+        while left > 0 {
+            let step = min(left, 60)
+            wheelEvent(step, at: p)?.post(tap: .cghidEventTap)
+            left -= step
+            usleep(4000)
+        }
+        try? await Task.sleep(nanoseconds: 40_000_000)
+        park(at: old)    // с событием движения — браузер снимет hover со ссылки в точке прокрутки
+    }
+
+    /// Перевести курсор событием движения (в отличие от warp браузер узнаёт, что курсор ушёл)
     static func park(at p: CGPoint) {
         CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
     }
 
-    /// Активировать приложение, чьё окно под точкой (не QScreen), — чтобы ему ушли Cmd+= / Cmd+-
+    /// Активировать приложение, чьё окно под точкой, — чтобы ему ушли Cmd+= / Cmd+-
     static func activateApp(at p: CGPoint) -> pid_t? {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
-        let me = getpid()
-        for w in list {
-            guard (w[kCGWindowLayer as String] as? Int) == 0,
-                  let pid = w[kCGWindowOwnerPID as String] as? pid_t, pid != me,
-                  let bd = w[kCGWindowBounds as String] as? [String: Any],
-                  let r = CGRect(dictionaryRepresentation: bd as CFDictionary), r.contains(p) else { continue }
-            NSRunningApplication(processIdentifier: pid)?.activate(options: [])
-            return pid
-        }
-        return nil
+        guard let t = windowAt(p) else { return nil }
+        NSRunningApplication(processIdentifier: t.pid)?.activate(options: [])
+        return t.pid
     }
 
     /// Cmd+'=' (масштаб +) или Cmd+'-' (масштаб −)
@@ -632,8 +663,7 @@ final class ScrollCaptureManager {
             let rect = self.targetQuartzRect
             let center = CGPoint(x: rect.midX, y: rect.midY)
             let step = max(40, rect.height * 0.6)
-            var direction: Int32 = -1
-            var directionChecked = self.engine.frameCount > 1
+            var firstStep = self.engine.frameCount <= 1
 
             // «Чёткий текст»: увеличиваем масштаб страницы — текст рисуется реальными пикселями, а не растягивается
             if self.engine.frameCount == 0 && UserDefaults.standard.bool(forKey: "scrollHiDPI"),
@@ -647,7 +677,9 @@ final class ScrollCaptureManager {
                 try? await Task.sleep(nanoseconds: 700_000_000)   // перерисовка в новом масштабе
                 guard token == self.session else { return }
             }
-            if let pp = self.parkPoint { ScrollInput.park(at: pp) }
+            if let pp = self.parkPoint { ScrollInput.park(at: pp) }   // один раз: курсор на панель, к «Стоп», и не над ссылками
+            let target = ScrollInput.windowAt(center)
+            var direct = target != nil                                // колесо адресно окну — курсор не трогаем
 
             if self.engine.frameCount == 0 {
                 guard let first = await self.captureSettled(token) else { return }
@@ -659,10 +691,9 @@ final class ScrollCaptureManager {
             var misses = 0
             while token == self.session, !Task.isCancelled, self.engine.frameCount < 200, self.engine.resultHeight < 60000 {
                 if misses == 0 {
-                    ScrollInput.scroll(points: step, direction: direction, at: center)
-                    try? await Task.sleep(nanoseconds: 60_000_000)
-                    if let pp = self.parkPoint { ScrollInput.park(at: pp) }   // без курсора над ссылками
-                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    if direct, let t = target { ScrollInput.scrollDirect(points: step, at: center, pid: t.pid, windowID: t.id) }
+                    else { await ScrollInput.scrollViaCursor(points: step, at: center) }
+                    try? await Task.sleep(nanoseconds: 150_000_000)
                 } else {
                     // стык не нашёлся — обычно догружаются картинки/реклама: ждём и переснимаем то же место
                     try? await Task.sleep(nanoseconds: 300_000_000)
@@ -671,16 +702,16 @@ final class ScrollCaptureManager {
                 let r = self.engine.add(img, expectedDy: Int(step * self.scale), requireMatch: true, relaxed: misses >= 2)
                 switch r {
                 case .appended:
-                    directionChecked = true
+                    firstStep = false
                     still = 0; misses = 0
                 case .identical:
                     misses = 0
-                    if !directionChecked {
-                        // первый шаг страницу не сдвинул — пробуем в другую сторону (инвертированное направление)
-                        directionChecked = true
-                        direction = -direction
+                    if firstStep && direct {
+                        // приложение не приняло адресное колесо — дальше через курсор (на миг, с возвратом на место)
+                        direct = false
                         continue
                     }
+                    firstStep = false
                     still += 1                       // конец страницы — только когда реально ничего не движется
                 case .noMatch, .first:
                     misses += 1
@@ -1120,6 +1151,166 @@ final class CaptureEngine {
             NSLog("QScreen window capture failed: \(error)")
             return nil
         }
+    }
+}
+
+/// «Улучшить ×2»: нейросеть Real-ESRGAN general-x4v3 (BSD-3) на видеокарте через MPSGraph — без сторонних библиотек.
+/// Сеть даёт ×4, результат усредняется 2×2 до ×2: края текста чище, чем при прямом ×2.
+/// Плитки 232 px с полями 12 px — без швов и без гигантских тензоров.
+/// Веса (~5 МБ) скачиваются при первом использовании по ссылке с фиксированным коммитом и сверяются по SHA-256.
+final class AIUpscaler: @unchecked Sendable {
+    static let shared = AIUpscaler()
+    private static let modelURL = URL(string: "https://raw.githubusercontent.com/Q00000P/QScreen/70dbcce553d5107031a372ad49855660f08af53b/models/realesr-general-x4v3.bin")!
+    private static let modelSHA = "d68a3ddc00caae680a35233ed54268aef47119f5f66dd36fc6b7b7e053924e4d"
+    private static var modelPath: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("QScreen/models/realesr-general-x4v3.bin")
+    }
+    private let tile = 232, pad = 12
+    private var side: Int { tile + 2 * pad }
+    private var graph: MPSGraph?
+    private var inTensor: MPSGraphTensor?
+    private var outTensor: MPSGraphTensor?
+    private var device: MTLDevice?
+    private let lock = NSLock()
+
+    private static func err(_ s: String) -> NSError { NSError(domain: "QScreen", code: 1, userInfo: [NSLocalizedDescriptionKey: s]) }
+    private static func sha(_ d: Data) -> String { SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined() }
+
+    /// Модель на месте и целая — true; иначе спросить и скачать
+    @MainActor
+    static func ensureModel() async -> Bool {
+        if let d = try? Data(contentsOf: modelPath), sha(d) == modelSHA { return true }
+        let alert = NSAlert()
+        alert.messageText = "Улучшить ×2"
+        alert.informativeText = "Нужна модель нейросети (около 5 МБ, разовая загрузка). Скачать сейчас?"
+        alert.addButton(withTitle: "Скачать")
+        alert.addButton(withTitle: "Отмена")
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: modelURL)
+            guard sha(data) == modelSHA else { throw err("контрольная сумма не совпала") }
+            try FileManager.default.createDirectory(at: modelPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: modelPath, options: .atomic)
+            return true
+        } catch {
+            let a = NSAlert()
+            a.messageText = "Не удалось скачать модель"
+            a.informativeText = error.localizedDescription
+            a.runModal()
+            return false
+        }
+    }
+
+    private func buildGraph() throws {
+        if graph != nil { return }
+        guard let dev = MTLCreateSystemDefaultDevice() else { throw Self.err("нет Metal-устройства") }
+        let data = try Data(contentsOf: Self.modelPath)
+        guard data.prefix(4) == Data("QSR1".utf8) else { throw Self.err("повреждённая модель") }
+        var off = 4
+        func take(_ n: Int) -> Data { let d = data.subdata(in: off..<(off + n * 4)); off += n * 4; return d }
+
+        let g = MPSGraph()
+        let S = side
+        let inp = g.placeholder(shape: [1, 3, NSNumber(value: S), NSNumber(value: S)], dataType: .float32, name: "in")
+        guard let desc = MPSGraphConvolution2DOpDescriptor(strideInX: 1, strideInY: 1, dilationRateInX: 1, dilationRateInY: 1, groups: 1,
+                                                          paddingLeft: 1, paddingRight: 1, paddingTop: 1, paddingBottom: 1,
+                                                          paddingStyle: .explicit, dataLayout: .NCHW, weightsLayout: .OIHW) else { throw Self.err("MPSGraph") }
+        let zero = g.constant(0, dataType: .float32)
+        var x = inp
+        for i in 0..<34 {                               // 34 свёртки 3×3, между ними PReLU
+            let ic = i == 0 ? 3 : 64, oc = i == 33 ? 48 : 64
+            let w = g.constant(take(oc * ic * 9), shape: [NSNumber(value: oc), NSNumber(value: ic), 3, 3], dataType: .float32)
+            let b = g.constant(take(oc), shape: [1, NSNumber(value: oc), 1, 1], dataType: .float32)
+            x = g.addition(g.convolution2D(x, weights: w, descriptor: desc, name: nil), b, name: nil)
+            if i < 33 {
+                let sl = g.constant(take(64), shape: [1, 64, 1, 1], dataType: .float32)
+                x = g.addition(g.maximum(x, zero, name: nil), g.multiplication(g.minimum(x, zero, name: nil), sl, name: nil), name: nil)
+            }
+        }
+        guard off == data.count else { throw Self.err("неожиданный размер модели") }
+        let ps = g.depthToSpace2D(x, widthAxis: 3, heightAxis: 2, depthAxis: 1, blockSize: 4, usePixelShuffleOrder: true, name: nil)   // PixelShuffle(4)
+        let base = g.resize(inp, size: [NSNumber(value: S * 4), NSNumber(value: S * 4)], mode: .nearest,
+                            centerResult: false, alignCorners: false, layout: .NCHW, name: nil)
+        outTensor = g.addition(ps, base, name: nil)
+        inTensor = inp
+        graph = g
+        device = dev
+    }
+
+    /// ×2. Вызывать в фоне. progress — 0..1.
+    func upscale2x(_ cg: CGImage, progress: @escaping (Double) -> Void) throws -> CGImage {
+        lock.lock(); defer { lock.unlock() }
+        try buildGraph()
+        guard let g = graph, let inp = inTensor, let out = outTensor, let dev = device else { throw Self.err("MPSGraph") }
+
+        let w = cg.width, h = cg.height
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        let cs: CGColorSpace = (cg.colorSpace?.supportsOutput ?? false) ? cg.colorSpace! : srgb
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue
+        var src = [UInt8](repeating: 0, count: w * h * 4)
+        let drawn = src.withUnsafeMutableBytes { p -> Bool in
+            guard let ctx = CGContext(data: p.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: cs, bitmapInfo: info) else { return false }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drawn else { throw Self.err("не удалось прочитать картинку") }
+
+        let W2 = w * 2, H2 = h * 2
+        var dst = [UInt8](repeating: 255, count: W2 * H2 * 4)
+        let S = side, plane = S * S, S4 = S * 4, plane4 = S4 * S4
+        var inBuf = [Float](repeating: 0, count: 3 * plane)
+        var outBuf = [Float](repeating: 0, count: 3 * plane4)
+        let gdev = MPSGraphDevice(mtlDevice: dev)
+        let total = ((w + tile - 1) / tile) * ((h + tile - 1) / tile)
+        var done = 0
+
+        for ty in stride(from: 0, to: h, by: tile) {
+            for tx in stride(from: 0, to: w, by: tile) {
+                // плитка с полями; за краем картинки — повтор крайних пикселей
+                for yy in 0..<S {
+                    let sy = min(max(ty - pad + yy, 0), h - 1)
+                    for xx in 0..<S {
+                        let sx = min(max(tx - pad + xx, 0), w - 1)
+                        let i = (sy * w + sx) * 4, o = yy * S + xx
+                        inBuf[o] = Float(src[i]) / 255
+                        inBuf[plane + o] = Float(src[i + 1]) / 255
+                        inBuf[2 * plane + o] = Float(src[i + 2]) / 255
+                    }
+                }
+                let td = MPSGraphTensorData(device: gdev, data: inBuf.withUnsafeBufferPointer { Data(buffer: $0) },
+                                            shape: [1, 3, NSNumber(value: S), NSNumber(value: S)], dataType: .float32)
+                let res = g.run(feeds: [inp: td], targetTensors: [out], targetOperations: nil)
+                guard let otd = res[out] else { throw Self.err("ошибка нейросети") }
+                outBuf.withUnsafeMutableBytes { otd.mpsndarray().readBytes($0.baseAddress!, strideBytes: nil) }
+
+                let vw = min(tile, w - tx), vh = min(tile, h - ty)
+                outBuf.withUnsafeBufferPointer { ob in
+                    for oy in 0..<(vh * 2) {
+                        let y4 = pad * 4 + oy * 2
+                        let drow = ((ty * 2 + oy) * W2 + tx * 2) * 4
+                        for ox in 0..<(vw * 2) {
+                            let x4 = pad * 4 + ox * 2
+                            let a = y4 * S4 + x4, b = a + S4
+                            let di = drow + ox * 4
+                            for c in 0..<3 {
+                                let o = c * plane4
+                                let v = (ob[o + a] + ob[o + a + 1] + ob[o + b] + ob[o + b + 1]) * 0.25
+                                dst[di + c] = UInt8(max(0, min(255, Int(v * 255 + 0.5))))
+                            }
+                            dst[di + 3] = 255
+                        }
+                    }
+                }
+                done += 1
+                progress(Double(done) / Double(total))
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(dst) as CFData),
+              let result = CGImage(width: W2, height: H2, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: W2 * 4, space: cs,
+                                   bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue), provider: provider,
+                                   decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { throw Self.err("не удалось собрать картинку") }
+        return result
     }
 }
 
@@ -2735,6 +2926,7 @@ struct CaptureEditorView: View {
     @State private var activeTextString: String = ""
     @FocusState private var isTextFocused: Bool
     @State private var toastMessage: String?
+    @State private var upscaling = false
 
     let colorPalette: [Color] = [
         Color(red: 1.0, green: 0.18, blue: 0.33),
@@ -2869,6 +3061,10 @@ struct CaptureEditorView: View {
                     Button(action: runOCR) {
                         Image(systemName: "doc.text.viewfinder").frame(width: 28, height: 26).background(Color.white.opacity(0.12)).cornerRadius(5)
                     }.help("OCR Распознавание текста")
+
+                    Button(action: runUpscale) {
+                        Image(systemName: "wand.and.stars").frame(width: 28, height: 26).background(Color.white.opacity(upscaling ? 0.3 : 0.12)).cornerRadius(5)
+                    }.disabled(upscaling).help("Улучшить ×2 (нейросеть): чётче текст и края")
 
                     Button(action: undoLastAction) {
                         Image(systemName: "arrow.uturn.backward").frame(width: 28, height: 26).background(Color.white.opacity(0.12)).cornerRadius(5)
@@ -3077,6 +3273,34 @@ struct CaptureEditorView: View {
         items.removeAll(); currentShape = nil
         cropStart = nil; cropCurrent = nil; cropDragging = false
         selectedTool = .arrow
+    }
+
+    /// Нейросеть ×2: картинка с аннотациями «запекается», пикселей вдвое больше по каждой стороне,
+    /// на экране размер тот же, при сохранении — полное разрешение
+    @MainActor
+    private func runUpscale() {
+        guard !upscaling else { return }
+        Task { @MainActor in
+            guard await AIUpscaler.ensureModel() else { return }
+            guard let flat = renderFlattened(), let cg = flat.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+            if cg.width * cg.height > 40_000_000 { showToast("Слишком большая картинка для ×2"); return }
+            upscaling = true
+            toastMessage = "Улучшаю ×2…"
+            let size = currentImage.size
+            let setProgress: @Sendable (Double) -> Void = { p in
+                Task { @MainActor in toastMessage = "Улучшаю ×2… \(Int(p * 100))%" }
+            }
+            let result: CGImage? = await Task.detached(priority: .userInitiated) {
+                try? AIUpscaler.shared.upscale2x(cg, progress: setProgress)
+            }.value
+            upscaling = false
+            guard let out = result else { showToast("Не удалось улучшить"); return }
+            let img = NSImage(cgImage: out, size: size)
+            currentImage = img
+            pixellatedImage = generatePixellatedImage(from: img)
+            items.removeAll(); currentShape = nil
+            showToast("Готово: \(out.width)×\(out.height)")
+        }
     }
 
     private func runOCR() {

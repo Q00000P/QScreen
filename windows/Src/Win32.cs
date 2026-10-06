@@ -123,6 +123,29 @@ namespace QScreen
             SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>());
         }
 
+        [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        public const int WM_MOUSEWHEEL = 0x020A;
+
+        /// <summary>Колесо прямо окну под точкой сообщением WM_MOUSEWHEEL — курсор не двигается, мышью можно пользоваться</summary>
+        public static bool WheelTo(System.Drawing.Point at, int notches)
+        {
+            var h = WindowFromPoint(new POINT { X = at.X, Y = at.Y });
+            if (h == IntPtr.Zero) return false;
+            int delta = notches * 120;
+            var wParam = new IntPtr(unchecked((int)(((uint)delta & 0xFFFF) << 16)));
+            var lParam = new IntPtr(unchecked((int)((((uint)at.Y & 0xFFFF) << 16) | ((uint)at.X & 0xFFFF))));   // экранные координаты
+            return PostMessage(h, WM_MOUSEWHEEL, wParam, lParam);
+        }
+
+        /// <summary>Запасной путь для окон, которые не берут WM_MOUSEWHEEL: курсор на миг в точку, колесо, курсор обратно</summary>
+        public static async System.Threading.Tasks.Task WheelViaCursor(System.Drawing.Point at, int notches)
+        {
+            GetCursorPos(out var old);
+            Wheel(at, notches);
+            await System.Threading.Tasks.Task.Delay(40);   // колесо уходит окну под курсором в момент обработки — не возвращать раньше
+            SetCursorPos(old.X, old.Y);
+        }
+
         /// <summary>Сделать активным окно верхнего уровня под точкой (чтобы ему ушли Ctrl+= / Ctrl+-)</summary>
         public static IntPtr ActivateWindowAt(System.Drawing.Point p)
         {
