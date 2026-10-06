@@ -1229,7 +1229,13 @@ final class AIUpscaler: @unchecked Sendable {
             }
         }
         guard off == data.count else { throw Self.err("неожиданный размер модели") }
-        let ps = g.depthToSpace2D(x, widthAxis: 3, heightAxis: 2, depthAxis: 1, blockSize: 4, usePixelShuffleOrder: true, name: nil)   // PixelShuffle(4)
+        // PixelShuffle(4): [1, 3·16, S, S] → [3, 4, 4, S, S] → (C, H, a, W, b) → [1, 3, 4S, 4S]
+        let n = NSNumber(value: S)
+        var t = g.reshape(x, shape: [3, 4, 4, n, n], name: nil)
+        t = g.transposeTensor(t, dimension: 1, withDimension: 3, name: nil)   // (C, H, b, a, W)
+        t = g.transposeTensor(t, dimension: 2, withDimension: 3, name: nil)   // (C, H, a, b, W)
+        t = g.transposeTensor(t, dimension: 3, withDimension: 4, name: nil)   // (C, H, a, W, b)
+        let ps = g.reshape(t, shape: [1, 3, NSNumber(value: S * 4), NSNumber(value: S * 4)], name: nil)
         let base = g.resize(inp, size: [NSNumber(value: S * 4), NSNumber(value: S * 4)], mode: .nearest,
                             centerResult: false, alignCorners: false, layout: .NCHW, name: nil)
         outTensor = g.addition(ps, base, name: nil)
