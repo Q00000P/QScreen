@@ -176,6 +176,11 @@ namespace QScreen
             };
         }
 
+        [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint affinity);
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int cmd);
+        public const uint WDA_EXCLUDEFROMCAPTURE = 0x11;   // Windows 10 2004+: окна нет ни в BitBlt, ни в WGC, на экране оно видно
+        public const int SW_HIDE = 0, SW_SHOWNOACTIVATE = 4;
+
         /// <summary>Окно, которое никогда не забирает фокус (аналог nonactivatingPanel).</summary>
         public static void MakeNonActivating(Window window)
         {

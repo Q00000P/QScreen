@@ -304,7 +304,7 @@ namespace QScreen
         public static void CaptureCurrentFrame()
         {
             if (_running) return;
-            using var bmp = CaptureEngine.Capture(_target);
+            using var bmp = Grab(sound: true);
             if (bmp == null) return;
             _engine.Add(bmp, null, requireMatch: false);
             UpdatePanel();
@@ -402,14 +402,31 @@ namespace QScreen
             if (token == _session) Finish();
         }
 
+        /// <summary>
+        /// Кадр области без своей панели. Обычно панель исключена из захвата системой (WDA_EXCLUDEFROMCAPTURE),
+        /// и её можно держать хоть поверх области. На старых Windows 10 — прячем на время кадра, если она над областью.
+        /// </summary>
+        private static Bitmap? Grab(bool sound)
+        {
+            IntPtr h = IntPtr.Zero;
+            if (_panel != null && !_panel.ExcludedFromCapture)
+            {
+                h = new System.Windows.Interop.WindowInteropHelper(_panel).Handle;
+                if (!(Win32.GetWindowRect(h, out var r) && new Rectangle(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top).IntersectsWith(_target))) h = IntPtr.Zero;
+            }
+            if (h != IntPtr.Zero) { Win32.ShowWindow(h, Win32.SW_HIDE); System.Threading.Thread.Sleep(50); }   // дать DWM перерисовать экран
+            try { return CaptureEngine.Capture(_target, sound); }
+            finally { if (h != IntPtr.Zero) Win32.ShowWindow(h, Win32.SW_SHOWNOACTIVATE); }
+        }
+
         private static async Task<Bitmap?> CaptureSettled(int token)
         {
-            var last = CaptureEngine.Capture(_target, sound: false);
+            var last = Grab(sound: false);
             for (int i = 0; i < 6 && last != null; i++)
             {
                 if (token != _session) { last.Dispose(); return null; }
                 await Task.Delay(90);
-                var next = CaptureEngine.Capture(_target, sound: false);
+                var next = Grab(sound: false);
                 if (next == null) return last;
                 bool eq = ScrollStitchEngine.RoughlyEqual(last, next);
                 last.Dispose();
@@ -467,6 +484,8 @@ namespace QScreen
         private readonly TextBlock _title, _height, _hint;
         private readonly System.Windows.Shapes.Ellipse _dot;
         private readonly StackPanel _btns;
+        /// <summary>Система не включает панель в снимки экрана</summary>
+        public bool ExcludedFromCapture { get; private set; }
 
         public ScrollPanelWindow(Rectangle target)
         {
@@ -490,6 +509,8 @@ namespace QScreen
             {
                 var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
                 Win32.SetWindowPos(hwnd, Win32.HWND_TOPMOST, px, py, 0, 0, Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW);
+                // Область на весь экран — панели некуда отойти; пусть система вырезает её из кадров
+                ExcludedFromCapture = Win32.SetWindowDisplayAffinity(hwnd, Win32.WDA_EXCLUDEFROMCAPTURE);
                 // Esc — закончить (на время сессии; окно не активируется, поэтому глобальный хоткей)
                 Win32.RegisterHotKey(hwnd, HK_ESC, Win32.MOD_NOREPEAT, 0x1B);
                 System.Windows.Interop.HwndSource.FromHwnd(hwnd)?.AddHook((IntPtr h, int msg, IntPtr wp, IntPtr lp, ref bool handled) =>
