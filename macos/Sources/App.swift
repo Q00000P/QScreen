@@ -1358,12 +1358,36 @@ final class OCREngine {
         if #available(macOS 13.0, *) { request.automaticallyDetectsLanguage = true }
         do {
             try handler.perform([request])
-            let obs = (request.results ?? []).sorted {
-                abs($0.boundingBox.midY - $1.boundingBox.midY) > 0.005 ? $0.boundingBox.midY > $1.boundingBox.midY : $0.boundingBox.minX < $1.boundingBox.minX
+            // Vision отдаёт блоки по колонкам — собираем их обратно в строки: что на одной высоте, то в одну строку
+            let obs = (request.results ?? []).sorted { $0.boundingBox.midY > $1.boundingBox.midY }
+            var rows: [(lo: CGFloat, hi: CGFloat, items: [VNRecognizedTextObservation])] = []
+            for o in obs {
+                let b = o.boundingBox
+                if var last = rows.last {
+                    let ov = min(last.hi, b.maxY) - max(last.lo, b.minY)
+                    if ov >= 0.5 * min(last.hi - last.lo, b.height) {
+                        last.lo = min(last.lo, b.minY); last.hi = max(last.hi, b.maxY); last.items.append(o)
+                        rows[rows.count - 1] = last
+                        continue
+                    }
+                }
+                rows.append((b.minY, b.maxY, [o]))
             }
-            return obs.compactMap { o in
-                guard let s = o.topCandidates(1).first?.string else { return nil }
-                return (s, Double(1 - o.boundingBox.maxY) * Double(cg.height))
+            return rows.compactMap { r in
+                let items = r.items.sorted { $0.boundingBox.minX < $1.boundingBox.minX }
+                var text = ""
+                var prevMaxX: CGFloat?
+                for o in items {
+                    guard let s = o.topCandidates(1).first?.string else { continue }
+                    if let p = prevMaxX {
+                        let gapPx = (o.boundingBox.minX - p) * CGFloat(cg.width)
+                        let hPx = o.boundingBox.height * CGFloat(cg.height)
+                        text += gapPx > 1.2 * hPx ? "    " : " "
+                    }
+                    text += s
+                    prevMaxX = o.boundingBox.maxX
+                }
+                return text.isEmpty ? nil : (text, Double(1 - r.hi) * Double(cg.height))
             }
         } catch { return [] }
     }

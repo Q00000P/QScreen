@@ -690,9 +690,27 @@ namespace QScreen
 
         private void PinScreenshot() => OnPin?.Invoke(RenderFinalImage());
 
-        private void RunOcr()
+        private bool _ocrBusy;
+        private static bool _askedOcrEn;
+
+        private async void RunOcr()
         {
-            var text = OcrEngine.ExtractText(RenderFinalImage(ignoreBeautify: true));
+            if (_ocrBusy) return;
+            // без английского пакета латиница читается кириллицей — предложить поставить (один раз за запуск)
+            if (!OcrEngine.HasEnglish && OcrEngine.HasRussian && !_askedOcrEn)
+            {
+                _askedOcrEn = true;
+                var r = MessageBox.Show(this, "Для распознавания латиницы (английских слов, названий) нужен английский пакет OCR Windows.\n\nУстановить сейчас? Понадобятся права администратора, займёт около минуты. После установки перезапустите QScreen.",
+                    "QScreen — OCR", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (r == MessageBoxResult.Yes) OcrEngine.InstallEnglish();
+            }
+            var img = RenderFinalImage(ignoreBeautify: true);
+            if (img.CanFreeze && !img.IsFrozen) img.Freeze();
+            _ocrBusy = true;
+            ShowToast("Распознаю текст…", persist: true);
+            string? text;
+            try { text = await System.Threading.Tasks.Task.Run(() => OcrEngine.ExtractText(img)); }
+            finally { _ocrBusy = false; }
             if (text == null) { ShowToast("OCR недоступен: установите языковой пакет Windows"); return; }
             if (text.Length == 0) { ShowToast("Текст не найден"); return; }
             try { Clipboard.SetText(text); } catch { }
