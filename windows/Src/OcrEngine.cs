@@ -29,7 +29,7 @@ namespace QScreen
         private const double TargetWordH = 36;     // высота слова, на которой движок читает уверенно
         private const int Strip = 1200, Overlap = 120;   // полосы в пикселях исходника
 
-        private readonly struct Word
+        internal readonly struct Word
         {
             public readonly string Text; public readonly double X, Y, W, H;
             public Word(string t, double x, double y, double w, double h) { Text = t; X = x; Y = y; W = w; H = h; }
@@ -39,6 +39,12 @@ namespace QScreen
 
         public static string? ExtractText(BitmapSource image)
         {
+            // своя нейросеть (PP-OCRv5): русский и латиница вперемешку, мелкий шрифт; системный движок — запасной путь
+            if (NeuralOcr.Ready)
+            {
+                try { return NeuralOcr.Extract(image); }
+                catch { }
+            }
             try
             {
                 var (primary, english) = Engines();
@@ -137,7 +143,7 @@ namespace QScreen
 
         // ---------- картинка ----------
 
-        private static Bitmap ToBitmap(BitmapSource src, out int w, out int h)
+        internal static Bitmap ToBitmap(BitmapSource src, out int w, out int h)
         {
             var px = BitmapUtil.GetBgra(src, out w, out h, out int stride);
             var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
@@ -261,7 +267,7 @@ namespace QScreen
         // ---------- раскладка ----------
 
         /// <summary>Слова → строки по вертикали, внутри строки — слева направо; большой разрыв (колонки) — 4 пробела.</summary>
-        private static string Layout(List<Word> words)
+        internal static string Layout(List<Word> words)
         {
             if (words.Count == 0) return "";
             var rows = new List<List<Word>>();
